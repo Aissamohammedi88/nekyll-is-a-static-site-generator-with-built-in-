@@ -1,0 +1,575 @@
+#!/usr/bin/env python3# -*- coding: utf-8 -*-
+"""
+🧬 NEXUS DESIGNER — CreWos Sybot
+Forge unique. Tous les tools. Design Apple + GitHub + React.
+Ouvre le port direct. Voir les tools.
+
+Usage :
+python3 nexus_designer.py
+"""
+import os, sys, ssl, re, json, time, socket, hashlib, secrets
+import urllib.request, urllib.error
+import http.server, socketserver, threading
+from urllib.parse import urlparse, quote
+from datetime import datetime
+from pathlib import Path
+
+# ═══════════════════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════════════════
+PORT = 9002
+HOST = "0.0.0.0"
+OUTPUT = Path.home() / "Documents" / "nexus_designer"
+OUTPUT.mkdir(parents=True, exist_ok=True)
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+HEADERS = {
+'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
+'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+'Accept-Language': 'en-US,en;q=0.9,fr;q=0.8',
+}
+
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'; B = '\033[94m'; C = '\033[96m'; M = '\033[95m'; N = '\033[0m'
+def ok(m): print(f"{V}✅{N} {m}")
+def no(m): print(f"{R}❌{N} {m}")
+def warn(m): print(f"{J}⚠️ {N} {m}")
+def info(m): print(f"{B}ℹ️ {N} {m}")
+def sect(m): print(f"\n{C}{'═'*64}{N}\n{C} {m}{N}\n{C}{'═'*64}{N}\n")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TOOLS — 20 outils dans une seule forge
+# ═══════════════════════════════════════════════════════════════════
+TOOLS = {}
+
+def tool(nom):
+"""Décorateur pour enregistrer un tool."""
+def wrapper(fn):
+TOOLS[nom] = fn
+return fn
+return wrapper
+
+
+# ─── TOOL 1 : Télécharger HTML ───
+@tool("download_html")
+def download_html(url):
+"""Télécharge une page HTML et renvoie (html, url_finale)."""
+req = urllib.request.Request(url, headers=HEADERS)
+try:
+with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
+return r.read().decode('utf-8', errors='ignore'), r.geturl()
+except Exception as e:
+return None, str(e)
+
+
+# ─── TOOL 2 : Analyser HTML ───
+@tool("analyze_html")
+def analyze_html(html):
+"""Analyse une page HTML et extrait les métadonnées."""
+if not html:
+return {}
+t = re.search(r'<title[^>]*>(.*?)</title>', html, re.I | re.S)
+title = t.group(1).strip() if t else "Sans titre"
+desc = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)', html, re.I)
+desc = desc.group(1) if desc else ""
+return {
+"title": title,
+"description": desc,
+"taille_html": len(html),
+"nb_scripts": len(re.findall(r'<script', html, re.I)),
+"nb_styles": len(re.findall(r'<link[^>]*stylesheet', html, re.I)),
+"nb_images": len(re.findall(r'<img', html, re.I)),
+"nb_links": len(re.findall(r'<a\s', html, re.I)),
+}
+
+
+# ─── TOOL 3 : Extraire les couleurs ───
+@tool("extract_colors")
+def extract_colors(html):
+"""Extrait toutes les couleurs CSS d'une page."""
+if not html:
+return []
+colors = set()
+# Hex
+for c in re.findall(r'#[0-9a-fA-F]{3,8}\b', html):
+colors.add(c.lower())
+# rgb/rgba
+for c in re.findall(r'rgba?\([^)]+\)', html):
+colors.add(c)
+return sorted(colors)[:50]
+
+
+# ─── TOOL 4 : Extraire les fonts ───
+@tool("extract_fonts")
+def extract_fonts(html):
+"""Extrait les polices utilisées."""
+if not html:
+return []
+fonts = set()
+for f in re.findall(r'font-family:\s*([^;}\n]+)', html, re.I):
+fonts.add(f.strip()[:80])
+for f in re.findall(r'fonts\.googleapis\.com/css2\?family=([^:"\']+)', html):
+fonts.add(f.replace("+", " "))
+return sorted(fonts)[:30]
+
+
+# ─── TOOL 5 : Extraire les animations ───
+@tool("extract_animations")
+def extract_animations(html):
+"""Détecte les animations CSS."""
+if not html:
+return {}
+return {
+"keyframes": len(re.findall(r'@keyframes', html, re.I)),
+"transitions": len(re.findall(r'transition:', html, re.I)),
+"transforms": len(re.findall(r'transform:', html, re.I)),
+"animations": len(re.findall(r'animation:', html, re.I)),
+"cubic_bezier": len(re.findall(r'cubic-bezier', html, re.I)),
+}
+
+
+# ─── TOOL 6 : Détecter le framework ───
+@tool("detect_framework")
+def detect_framework(html):
+"""Détecte le framework utilisé (React, Vue, etc.)."""
+if not html:
+return []
+frameworks = []
+checks = {
+"React": ["react", "_react", "react-dom", "__REACT"],
+"Vue": ["vue.js", "vue.min.js", "data-v-", "__vue__"],
+"Angular": ["ng-version", "angular.js", "ng-app"],
+"Svelte": ["svelte", "svelte-"],
+"Next.js": ["__next", "_next/static"],
+"Nuxt": ["__nuxt", "_nuxt/"],
+"Astro": ["astro-", "data-astro"],
+"Tailwind": ["tailwind", "tw-"],
+"Bootstrap": ["bootstrap"],
+"jQuery": ["jquery"],
+}
+for nom, signes in checks.items():
+for s in signes:
+if s.lower() in html.lower():
+frameworks.append(nom); break
+return frameworks
+
+
+# ─── TOOL 7 : Extraire les assets ───
+@tool("extract_assets")
+def extract_assets(html, base_url):
+"""Liste les images, CSS, scripts de la page."""
+if not html:
+return {}
+from urllib.parse import urljoin
+assets = {"images": [], "css": [], "js": [], "fonts": []}
+for m in re.findall(r'<img[^>]+src=["\']([^"\']+)', html, re.I):
+assets["images"].append(urljoin(base_url, m))
+for m in re.findall(r'<link[^>]+href=["\']([^"\']+\.css[^"\']*)', html, re.I):
+assets["css"].append(urljoin(base_url, m))
+for m in re.findall(r'<script[^>]+src=["\']([^"\']+)', html, re.I):
+assets["js"].append(urljoin(base_url, m))
+for m in re.findall(r'url\(["\']?([^"\')]+\.(woff2?|ttf|otf))', html, re.I):
+assets["fonts"].append(urljoin(base_url, m[0]))
+for k in assets:
+assets[k] = list(set(assets[k]))[:30]
+return assets
+
+
+# ─── TOOL 8 : Générer palette ───
+@tool("generate_palette")
+def generate_palette(colors, n=5):
+"""Génère une palette à partir des couleurs extraites."""
+if not colors:
+return ["#000000", "#ffffff", "#c8a45c", "#ff6ec7", "#00d4ff"][:n]
+return colors[:n]
+
+
+# ─── TOOL 9 : Analyser responsive ───
+@tool("analyze_responsive")
+def analyze_responsive(html):
+"""Détecte les media queries."""
+if not html:
+return {}
+mq = re.findall(r'@media[^{]+', html, re.I)
+breakpoints = set()
+for m in mq:
+for px in re.findall(r'(\d+)px', m):
+breakpoints.add(int(px))
+return {
+"nb_media_queries": len(mq),
+"breakpoints": sorted(breakpoints),
+}
+
+
+# ─── TOOL 10 : Extraire textes ───
+@tool("extract_texts")
+def extract_texts(html):
+"""Extrait les textes principaux (h1, h2, p)."""
+if not html:
+return {}
+def clean(s):
+return re.sub(r'<[^>]+>', '', s).strip()[:120]
+return {
+"h1": [clean(h) for h in re.findall(r'<h1[^>]*>(.*?)</h1>', html, re.I | re.S)][:10],
+"h2": [clean(h) for h in re.findall(r'<h2[^>]*>(.*?)</h2>', html, re.I | re.S)][:15],
+"paragraphes": [clean(p) for p in re.findall(r'<p[^>]*>(.*?)</p>', html, re.I | re.S)][:20],
+}
+
+
+# ─── TOOL 11 : Hash SHA256 ───
+@tool("hash_sha256")
+def hash_sha256(txt):
+return hashlib.sha256(str(txt).encode()).hexdigest()
+
+
+# ─── TOOL 12 : Token sécurisé ───
+@tool("gen_token")
+def gen_token(n=32):
+return secrets.token_urlsafe(n)
+
+
+# ─── TOOL 13 : Générer UUID ───
+@tool("gen_uuid")
+def gen_uuid():
+import uuid
+return str(uuid.uuid4())
+
+
+# ─── TOOL 14 : Tester port ───
+@tool("test_port")
+def test_port(host, port, timeout=3):
+try:
+s = socket.create_connection((host, int(port)), timeout=timeout)
+s.close()
+return True
+except Exception:
+return False
+
+
+# ─── TOOL 15 : Scanner ports ───
+@tool("scan_ports")
+def scan_ports(host, ports=None):
+if ports is None:
+ports = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 3306, 5432, 8080, 8443, 9000, 9001, 9002, 9003, 9004, 9019]
+resultats = {}
+for p in ports:
+resultats[p] = test_port(host, p, timeout=1)
+return resultats
+
+
+# ─── TOOL 16 : Whoami réseau ───
+@tool("public_ip")
+def public_ip():
+try:
+req = urllib.request.Request("https://api.ipify.org?format=json", headers=HEADERS)
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+return json.loads(r.read())
+except Exception as e:
+return {"erreur": str(e)}
+
+
+# ─── TOOL 17 : DNS lookup ───
+@tool("dns_lookup")
+def dns_lookup(host):
+try:
+return {"host": host, "ip": socket.gethostbyname(host)}
+except Exception as e:
+return {"host": host, "erreur": str(e)}
+
+
+# ─── TOOL 18 : HTTP status ───
+@tool("http_status")
+def http_status(url):
+try:
+req = urllib.request.Request(url, headers=HEADERS, method="HEAD")
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+return {"url": url, "code": r.status, "headers": dict(r.headers)}
+except urllib.error.HTTPError as e:
+return {"url": url, "code": e.code}
+except Exception as e:
+return {"url": url, "erreur": str(e)}
+
+
+# ─── TOOL 19 : Screenshot metadata ───
+@tool("page_metadata")
+def page_metadata(url):
+"""Récupère toutes les métadonnées d'une page."""
+html, final = download_html(url)
+if not html:
+return {"erreur": final}
+return {
+"url_finale": final,
+"meta": analyze_html(html),
+"couleurs": extract_colors(html),
+"fonts": extract_fonts(html),
+"animations": extract_animations(html),
+"framework": detect_framework(html),
+"responsive": analyze_responsive(html),
+"textes": extract_texts(html),
+}
+
+
+# ─── TOOL 20 : Forge UI ───
+@tool("forge_ui")
+def forge_ui(config):
+"""Génère un HTML/CSS/JS à partir d'une config."""
+nom = config.get("nom", "Nexus UI")
+couleur = config.get("couleur", "#c8a45c")
+return f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>{nom}</title>
+<style>
+:root {{ --primaire: {couleur}; --fond: #0a0014; }}
+body {{ background: var(--fond); color: white; font-family: -apple-system, system-ui; margin:0; padding:40px; }}
+h1 {{ color: var(--primaire); font-size: 48px; }}
+.card {{ background: rgba(200,164,92,0.1); border: 1px solid var(--primaire); border-radius: 16px; padding: 24px; }}
+</style>
+</head>
+<body>
+<h1>{nom}</h1>
+<div class="card">Forge par Nexus Designer</div>
+</body>
+</html>"""
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SERVEUR HTTP — Interface web pour voir tous les tools
+# ═══════════════════════════════════════════════════════════════════
+INDEX_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🧬 NEXUS DESIGNER</title>
+<style>
+:root {
+--primaire: #c8a45c;
+--secondaire: #ff6ec7;
+--accent: #00d4ff;
+--fond: #0a0014;
+--card: #14001f;
+--border: #2a1a3a;
+--texte: #fff;
+--muted: #888;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+font-family: -apple-system, "SF Pro Display", Inter, system-ui, sans-serif;
+background: var(--fond); color: var(--texte);
+min-height: 100vh; padding: 32px;
+background: radial-gradient(ellipse at top, rgba(200,164,92,0.1), transparent 60%), var(--fond);
+}
+header {
+max-width: 1200px; margin: 0 auto 40px;
+display: flex; justify-content: space-between; align-items: center;
+}
+.logo { font-size: 28px; font-weight: 700; letter-spacing: -1px; }
+.logo span { color: var(--primaire); }
+.version { color: var(--muted); font-size: 12px; }
+h1 {
+font-size: clamp(48px, 8vw, 96px);
+font-weight: 700; letter-spacing: -4px;
+background: linear-gradient(135deg, #fff 0%, #c8a45c 40%, #ff6ec7 100%);
+-webkit-background-clip: text; -webkit-text-fill-color: transparent;
+text-align: center; margin-bottom: 16px;
+animation: fadeIn 1s ease;
+}
+.subtitle {
+text-align: center; color: var(--muted); font-size: 18px;
+margin-bottom: 60px; animation: fadeIn 1s ease 0.2s both;
+}
+.stats {
+display: flex; gap: 40px; justify-content: center;
+margin-bottom: 60px; animation: fadeIn 1s ease 0.4s both;
+}
+.stat { text-align: center; }
+.stat .num { font-size: 42px; font-weight: 700; color: var(--primaire); display: block; }
+.stat .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: 2px; color: var(--muted); }
+.grid {
+display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+gap: 20px; max-width: 1200px; margin: 0 auto;
+}
+.tool {
+background: var(--card);
+border: 1px solid var(--border);
+border-radius: 16px;
+padding: 24px;
+transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+cursor: pointer;
+animation: slideUp 0.6s ease;
+position: relative;
+overflow: hidden;
+}
+.tool::before {
+content: '';
+position: absolute; top: 0; left: 0; right: 0;
+height: 2px;
+background: linear-gradient(90deg, transparent, var(--primaire), transparent);
+opacity: 0;
+transition: opacity 0.3s;
+}
+.tool:hover {
+transform: translateY(-4px);
+border-color: var(--primaire);
+box-shadow: 0 20px 40px rgba(200,164,92,0.15);
+}
+.tool:hover::before { opacity: 1; }
+.tool .icon { font-size: 32px; margin-bottom: 16px; display: block; }
+.tool .nom {
+font-size: 16px; font-weight: 600; margin-bottom: 8px;
+font-family: "SF Mono", Menlo, monospace;
+color: var(--primaire);
+}
+.tool .desc {
+font-size: 13px; color: var(--muted); line-height: 1.5;
+}
+footer {
+text-align: center; margin-top: 80px; padding-top: 40px;
+border-top: 1px solid var(--border);
+color: var(--muted); font-size: 13px;
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: none; } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(30px); } to { opacity: 1; transform: none; } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+.pulse { animation: pulse 2s infinite; }
+</style>
+</head>
+<body>
+<header>
+<div class="logo">NEXUS<span>.</span></div>
+<div class="version pulse">v1.0 — CreWos Sybot</div>
+</header>
+
+<h1>Designer Forge</h1>
+<p class="subtitle">Tous les tools dans une seule forge. Clique pour tester.</p>
+
+<div class="stats">
+<div class="stat"><span class="num" id="nb-tools">0</span><span class="lbl">Tools</span></div>
+<div class="stat"><span class="num">1</span><span class="lbl">Fichier</span></div>
+<div class="stat"><span class="num">0</span><span class="lbl">Dépendances</span></div>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<footer>
+🧬 NEXUS DESIGNER — Forge unique par CreWos Sybot<br>
+Python · React · Apple · GitHub · Designer
+</footer>
+
+<script>
+const TOOLS_INFO = __TOOLS_JSON__;
+const grid = document.getElementById('grid');
+document.getElementById('nb-tools').textContent = Object.keys(TOOLS_INFO).length;
+
+const icons = {
+download_html: "⬇️", analyze_html: "🔍", extract_colors: "🎨",
+extract_fonts: "🔤", extract_animations: "✨", detect_framework: "⚛️",
+extract_assets: "📦", generate_palette: "🌈", analyze_responsive: "📱",
+extract_texts: "📝", hash_sha256: "🔐", gen_token: "🔑",
+gen_uuid: "🆔", test_port: "🚪", scan_ports: "📡",
+public_ip: "🌐", dns_lookup: "🔗", http_status: "✅",
+page_metadata: "📊", forge_ui: "⚡"
+};
+
+Object.entries(TOOLS_INFO).forEach(([nom, desc], i) => {
+const div = document.createElement('div');
+div.className = 'tool';
+div.style.animationDelay = (i * 0.05) + 's';
+div.innerHTML = `
+<span class="icon">${icons[nom] || '🔧'}</span>
+<div class="nom">${nom}</div>
+<div class="desc">${desc}</div>
+`;
+div.onclick = () => {
+alert('Tool: ' + nom + '\\n\\nUtilise l\\'API:\\nGET /api/' + nom);
+};
+grid.appendChild(div);
+});
+
+// Animation d'entrée cinétique
+let scroll = 0;
+window.addEventListener('scroll', () => {
+scroll = window.scrollY;
+});
+</script>
+</body>
+</html>"""
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+def do_GET(self):
+if self.path == "/" or self.path == "/index.html":
+tools_json = json.dumps({k: (v.__doc__ or "").strip().split("\n")[0] for k, v in TOOLS.items()})
+html = INDEX_HTML.replace("__TOOLS_JSON__", tools_json)
+self.send_response(200)
+self.send_header("Content-Type", "text/html; charset=utf-8")
+self.end_headers()
+self.wfile.write(html.encode("utf-8"))
+elif self.path == "/api/tools":
+self._json({k: (v.__doc__ or "").strip() for k, v in TOOLS.items()})
+elif self.path.startswith("/api/"):
+tool_name = self.path[5:].split("?")[0]
+if tool_name in TOOLS:
+try:
+resultat = TOOLS[tool_name]("http://example.com") if tool_name in ["download_html", "analyze_html", "extract_colors", "extract_fonts", "extract_animations", "detect_framework", "analyze_responsive", "extract_texts", "page_metadata"] else "OK"
+self._json({"tool": tool_name, "status": "ok", "resultat": str(resultat)[:500]})
+except Exception as e:
+self._json({"tool": tool_name, "erreur": str(e)})
+else:
+self._json({"erreur": "tool inconnu"})
+else:
+self.send_response(404); self.end_headers()
+
+def _json(self, data):
+self.send_response(200)
+self.send_header("Content-Type", "application/json")
+self.send_header("Access-Control-Allow-Origin", "*")
+self.end_headers()
+self.wfile.write(json.dumps(data, indent=2, ensure_ascii=False).encode())
+
+def log_message(self, *a): pass
+
+
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+daemon_threads = True
+allow_reuse_address = True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════
+def main():
+print(f"""
+{M}╔════════════════════════════════════════════════════════════════╗
+║ 🧬 NEXUS DESIGNER — CreWos Sybot ║
+║ Forge unique. {len(TOOLS)} tools. Design Apple + GitHub. ║
+╚════════════════════════════════════════════════════════════════╝{N}
+""")
+info(f"Tools chargés : {len(TOOLS)}")
+for nom in TOOLS:
+print(f" 🔧 {nom}")
+print()
+info(f"Serveur : http://{HOST}:{PORT}/")
+info(f"API : http://{HOST}:{PORT}/api/tools")
+print()
+ok("Lance dans ton navigateur :")
+print(f" {C}http://192.168.1.42:{PORT}/{N}")
+print()
+warn("Ctrl+C pour arrêter")
+
+try:
+with Server((HOST, PORT), Handler) as srv:
+srv.serve_forever()
+except KeyboardInterrupt:
+print("\n👋 Arrêté.")
+except OSError as e:
+no(f"Port {PORT} : {e}")
+
+
+if __name__ == "__main__":
+main()
