@@ -1,7 +1,33 @@
 # <div align="center">
 
 # 🧬 NEKYLL
+name: Python application
 
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Lint with flake8
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82
+      - name: Test with pytest
+        run: |
+          pytest
 **Le générateur de sites statiques avec 10 outils intégrés.**
 
 [![NEKYLL CI](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions/workflows/nekyll-ci.yml/badge.svg)](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions)
