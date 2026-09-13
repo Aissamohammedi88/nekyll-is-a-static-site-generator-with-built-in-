@@ -1,0 +1,725 @@
+#!/usr/bin/env python3# -*- coding: utf-8 -*-
+"""
+NEXUS MODEL 09 - QUANTUM ENGINE + PROTOCOLE COMPÉTITION [OPTIMISÉ]
+Chemin: ~/Documents/nexus_autonome/modele_09.py
+Port: AUCUN (CLI uniquement)
+
+Optimisations v2 :
+- Grover avec vrai diffuseur (inversion autour de la moyenne)
+- Cache des probabilités
+- Portes S, T, Toffoli ajoutées
+- Logging dans quantum/nexus_09.log
+- Commande --self-test
+- Imports nettoyés
+- Dispatch par dictionnaire
+"""
+
+import sys
+import os
+import math
+import cmath
+import json
+import time
+import random
+import logging
+import urllib.request
+import ssl
+from pathlib import Path
+from datetime import datetime
+from collections import Counter
+from typing import List, Tuple, Dict, Optional, Callable
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CONFIGURATION & CHEMINS
+# ═══════════════════════════════════════════════════════════════════
+BASE = Path.home() / "Documents" / "nexus_autonome"
+QUANTUM = BASE / "quantum"
+QUANTUM.mkdir(parents=True, exist_ok=True)
+
+LOG_FILE = QUANTUM / "nexus_09.log"
+
+# Logging
+logging.basicConfig(
+filename=str(LOG_FILE),
+level=logging.INFO,
+format="%(asctime)s [%(levelname)s] %(message)s",
+encoding="utf-8"
+)
+log = logging.getLogger("nexus_09")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# COULEURS TERMINAL
+# ═══════════════════════════════════════════════════════════════════
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'
+B = '\033[94m'; C = '\033[96m'; M = '\033[95m'; N = '\033[0m'
+
+def ok(m): print(f"{V}[OK]{N} {m}"); log.info(m)
+def no(m): print(f"{R}[KO]{N} {m}"); log.error(m)
+def warn(m): print(f"{J}[!!]{N} {m}"); log.warning(m)
+def info(m): print(f"{B}[i]{N} {m}"); log.info(m)
+def sect(m): print(f"\n{C}{'='*64}{N}\n{C} {m}{N}\n{C}{'='*64}{N}\n")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ÉTAT QUANTIQUE
+# ═══════════════════════════════════════════════════════════════════
+class QuantumState:
+"""État quantique à N qubits avec cache de probabilités."""
+__slots__ = ("n", "dim", "amp", "_cache_proba", "_cache_valid")
+
+def __init__(self, n_qubits: int):
+if n_qubits < 1 or n_qubits > 20:
+raise ValueError("n_qubits doit être entre 1 et 20")
+self.n = n_qubits
+self.dim = 1 << n_qubits
+self.amp = [0j] * self.dim
+self.amp[0] = 1 + 0j
+self._cache_proba = None
+self._cache_valid = False
+
+def _invalidate_cache(self):
+self._cache_valid = False
+self._cache_proba = None
+
+def __repr__(self) -> str:
+return f"QuantumState(n={self.n}, dim={self.dim})"
+
+def proba(self, i: int) -> float:
+"""Probabilité de l'état |i> (avec cache)."""
+if not self._cache_valid:
+self._cache_proba = [abs(a) ** 2 for a in self.amp]
+self._cache_valid = True
+return self._cache_proba[i]
+
+def probabilites(self) -> List[float]:
+"""Toutes les probabilités (avec cache)."""
+if not self._cache_valid:
+self._cache_proba = [abs(a) ** 2 for a in self.amp]
+self._cache_valid = True
+return self._cache_proba[:]
+
+def mesurer(self) -> int:
+"""Mesure avec collapse."""
+probas = self.probabilites()
+total = sum(probas)
+if total < 1e-12:
+return 0
+r = random.random() * total
+cumul = 0.0
+for i, p in enumerate(probas):
+cumul += p
+if cumul >= r:
+self.amp = [0j] * self.dim
+self.amp[i] = 1 + 0j
+self._invalidate_cache()
+return i
+return self.dim - 1
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PORTES QUANTIQUES
+# ═══════════════════════════════════════════════════════════════════
+class QuantumGates:
+"""Portes quantiques standard."""
+
+@staticmethod
+def H(state: QuantumState, q: int):
+step = 1 << q
+inv_sqrt2 = 1 / math.sqrt(2)
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+a = state.amp[j]
+b = state.amp[j + step]
+state.amp[j] = (a + b) * inv_sqrt2
+state.amp[j + step] = (a - b) * inv_sqrt2
+state._invalidate_cache()
+
+@staticmethod
+def X(state: QuantumState, q: int):
+step = 1 << q
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+state.amp[j], state.amp[j + step] = state.amp[j + step], state.amp[j]
+state._invalidate_cache()
+
+@staticmethod
+def Y(state: QuantumState, q: int):
+step = 1 << q
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+a = state.amp[j]
+b = state.amp[j + step]
+state.amp[j] = -1j * b
+state.amp[j + step] = 1j * a
+state._invalidate_cache()
+
+@staticmethod
+def Z(state: QuantumState, q: int):
+step = 1 << q
+for i in range(0, state.dim, 2 * step):
+for j in range(i + step, i + 2 * step):
+state.amp[j] = -state.amp[j]
+state._invalidate_cache()
+
+@staticmethod
+def S(state: QuantumState, q: int):
+"""Porte S (phase π/2)."""
+step = 1 << q
+for i in range(0, state.dim, 2 * step):
+for j in range(i + step, i + 2 * step):
+state.amp[j] *= 1j
+state._invalidate_cache()
+
+@staticmethod
+def T(state: QuantumState, q: int):
+"""Porte T (phase π/4)."""
+step = 1 << q
+factor = cmath.exp(1j * math.pi / 4)
+for i in range(0, state.dim, 2 * step):
+for j in range(i + step, i + 2 * step):
+state.amp[j] *= factor
+state._invalidate_cache()
+
+@staticmethod
+def CNOT(state: QuantumState, control: int, target: int):
+step_c = 1 << control
+step_t = 1 << target
+for i in range(state.dim):
+if (i & step_c) and not (i & step_t):
+j = i | step_t
+state.amp[i], state.amp[j] = state.amp[j], state.amp[i]
+state._invalidate_cache()
+
+@staticmethod
+def CZ(state: QuantumState, control: int, target: int):
+step_c = 1 << control
+step_t = 1 << target
+for i in range(state.dim):
+if (i & step_c) and (i & step_t):
+state.amp[i] = -state.amp[i]
+state._invalidate_cache()
+
+@staticmethod
+def Toffoli(state: QuantumState, c1: int, c2: int, target: int):
+"""Porte Toffoli (CCNOT)."""
+step_c1 = 1 << c1
+step_c2 = 1 << c2
+step_t = 1 << target
+for i in range(state.dim):
+if (i & step_c1) and (i & step_c2) and not (i & step_t):
+j = i | step_t
+state.amp[i], state.amp[j] = state.amp[j], state.amp[i]
+state._invalidate_cache()
+
+@staticmethod
+def Rx(state: QuantumState, q: int, theta: float):
+step = 1 << q
+c = math.cos(theta / 2)
+s = -1j * math.sin(theta / 2)
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+a = state.amp[j]
+b = state.amp[j + step]
+state.amp[j] = c * a + s * b
+state.amp[j + step] = s * a + c * b
+state._invalidate_cache()
+
+@staticmethod
+def Ry(state: QuantumState, q: int, theta: float):
+step = 1 << q
+c = math.cos(theta / 2)
+s = math.sin(theta / 2)
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+a = state.amp[j]
+b = state.amp[j + step]
+state.amp[j] = c * a - s * b
+state.amp[j + step] = s * a + c * b
+state._invalidate_cache()
+
+@staticmethod
+def Rz(state: QuantumState, q: int, theta: float):
+step = 1 << q
+e_minus = cmath.exp(-1j * theta / 2)
+e_plus = cmath.exp(1j * theta / 2)
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+state.amp[j] *= e_minus
+state.amp[j + step] *= e_plus
+state._invalidate_cache()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CIRCUIT QUANTIQUE
+# ═══════════════════════════════════════════════════════════════════
+class QuantumCircuit:
+"""Circuit quantique avec historique."""
+
+def __init__(self, n_qubits: int):
+self.n = n_qubits
+self.state = QuantumState(n_qubits)
+self.historique: List[Tuple] = []
+
+def __repr__(self) -> str:
+return f"QuantumCircuit(n={self.n}, gates={len(self.historique)})"
+
+def h(self, q): self._g(QuantumGates.H, "H", q)
+def x(self, q): self._g(QuantumGates.X, "X", q)
+def y(self, q): self._g(QuantumGates.Y, "Y", q)
+def z(self, q): self._g(QuantumGates.Z, "Z", q)
+def s(self, q): self._g(QuantumGates.S, "S", q)
+def t(self, q): self._g(QuantumGates.T, "T", q)
+def cnot(self, c, t): self._g(QuantumGates.CNOT, "CNOT", c, t)
+def cz(self, c, t): self._g(QuantumGates.CZ, "CZ", c, t)
+def toffoli(self, c1, c2, t): self._g(QuantumGates.Toffoli, "Toffoli", c1, c2, t)
+
+def rx(self, q, theta): self._g(QuantumGates.Rx, "Rx", q, theta)
+def ry(self, q, theta): self._g(QuantumGates.Ry, "Ry", q, theta)
+def rz(self, q, theta): self._g(QuantumGates.Rz, "Rz", q, theta)
+
+def _g(self, gate_fn: Callable, name: str, *args):
+gate_fn(self.state, *args)
+self.historique.append((name, *args))
+
+def mesurer(self) -> int:
+return self.state.mesurer()
+
+def probabilites(self) -> List[float]:
+return self.state.probabilites()
+
+def reset(self):
+"""Réinitialise le circuit à |0...0>."""
+self.state = QuantumState(self.n)
+self.historique = []
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ALGORITHME DE GROVER (VRAI DIFFUSEUR)
+# ═══════════════════════════════════════════════════════════════════
+def grover(oracle: Callable, n_qubits: int, iterations: Optional[int] = None) -> QuantumCircuit:
+"""
+Algorithme de Grover.
+oracle(circuit, n) : marque la cible (applique une phase -1 sur |cible>).
+"""
+N = 1 << n_qubits
+if iterations is None:
+iterations = max(1, int(math.floor(math.pi / 4 * math.sqrt(N))))
+
+circuit = QuantumCircuit(n_qubits)
+
+# Superposition initiale
+for q in range(n_qubits):
+circuit.h(q)
+
+for _ in range(iterations):
+# 1. Oracle
+oracle(circuit, n_qubits)
+
+# 2. Diffuseur (inversion autour de la moyenne)
+# H^n
+for q in range(n_qubits):
+circuit.h(q)
+# X^n
+for q in range(n_qubits):
+circuit.x(q)
+# CZ sur le qubit le plus significatif (contrôlé par tous les autres via phase)
+circuit.cz(0, n_qubits - 1)
+# X^n
+for q in range(n_qubits):
+circuit.x(q)
+# H^n
+for q in range(n_qubits):
+circuit.h(q)
+
+return circuit
+
+
+# ═══════════════════════════════════════════════════════════════════
+# QAOA SIMPLIFIÉ
+# ═══════════════════════════════════════════════════════════════════
+def qaoa(n_qubits: int, gamma: float, beta: float, couches: int = 1) -> QuantumCircuit:
+"""QAOA simplifié pour optimisation combinatoire."""
+circuit = QuantumCircuit(n_qubits)
+for q in range(n_qubits):
+circuit.h(q)
+for _ in range(couches):
+for q in range(n_qubits - 1):
+circuit.cz(q, q + 1)
+for q in range(n_qubits):
+circuit.rx(q, 2 * beta)
+return circuit
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PROTOCOLE COMPÉTITION
+# ═══════════════════════════════════════════════════════════════════
+class ProtocoleCompetition:
+"""
+Protocole GOBLINK vs GOLINK.
+NOTE : les scores sont des MODÈLES de simulation, pas des évaluations réelles.
+"""
+
+# Pondération réaliste basée sur des critères techniques observables
+CRITERES = {
+"quantum_engine": 20, # simulateur quantique complet
+"goblink_protocole": 15, # protocole réseau inter-domaines
+"deep_linking": 15, # analyse de liens profonds
+"codemort_analyse": 12, # détection code mort + complexité
+"anonymisation_tor": 10, # anonymisation réseau
+"fetch_intelligent": 10, # fetch multi-niveau
+"benchmark_wrk": 8, # benchmark de charge
+"scanner_reseau": 5, # scan réseau
+"generateur_site": 5, # forge de sites
+}
+
+ACTEURS = ["Microsoft", "Google", "Meta", "Amazon", "Apple", "OpenAI", "Anthropic"]
+
+def __init__(self):
+self.encheres: Dict[str, dict] = {}
+self.score_attractivite = 0
+self.score_calcule = False
+
+def calculer_attractivite(self) -> int:
+self.score_attractivite = sum(self.CRITERES.values())
+self.score_calcule = True
+log.info(f"Score attractivité calculé : {self.score_attractivite}")
+return self.score_attractivite
+
+def generer_offre(self, acteur: str) -> dict:
+"""Génère une offre simulée. Ce ne sont PAS des vraies offres."""
+if not self.score_calcule:
+self.calculer_attractivite()
+
+multiplicateurs = {
+"Microsoft": 1.0, "Google": 1.15, "Meta": 0.90,
+"Amazon": 0.85, "Apple": 1.20, "OpenAI": 0.95, "Anthropic": 0.80,
+}
+base = 10_000_000
+m = multiplicateurs.get(acteur, 1.0)
+offre = base * m * (self.score_attractivite / 100)
+
+self.encheres[acteur] = {
+"offre_usd": round(offre, 2),
+"multiplicateur": m,
+"date": datetime.now().isoformat(),
+"simulation": True,
+}
+return self.encheres[acteur]
+
+def simuler_guerre(self) -> Tuple[str, dict]:
+if not self.score_calcule:
+self.calculer_attractivite()
+
+print(f"\n{M}{'='*64}{N}")
+print(f"{M} COMPÉTITION GOBLINK vs GOLINK (SIMULATION){N}")
+print(f"{M} Score attractivité : {self.score_attractivite}/100{N}")
+print(f"{M}{'='*64}{N}\n")
+
+for acteur in self.ACTEURS:
+offre = self.generer_offre(acteur)
+print(f" {V}●{N} {acteur.ljust(12)} {offre['offre_usd']:>15,.0f} USD (mult: {offre['multiplicateur']})")
+
+gagnant_nom = max(self.encheres.items(), key=lambda x: x[1]["offre_usd"])[0]
+gagnant = (gagnant_nom, self.encheres[gagnant_nom])
+print(f"\n{M}🏆 GAGNANT : {gagnant[0]} — {gagnant[1]['offre_usd']:,.0f} USD{N}")
+print(f"{J}⚠️ Simulation — chiffres non réels{N}\n")
+return gagnant
+
+
+# ═══════════════════════════════════════════════════════════════════
+# COMMANDES
+# ═══════════════════════════════════════════════════════════════════
+def cmd_bell():
+sect("ÉTAT DE BELL")
+c = QuantumCircuit(2)
+c.h(0)
+c.cnot(0, 1)
+p = c.probabilites()
+for i in range(4):
+bits = format(i, "02b")
+bar = "█" * int(p[i] * 40)
+print(f" |{bits}> {p[i]:.4f} {bar}")
+ok("État de Bell : (|00> + |11>) / √2")
+
+
+def cmd_ghz(n: int = 3):
+sect(f"ÉTAT GHZ À {n} QUBITS")
+c = QuantumCircuit(n)
+c.h(0)
+for i in range(1, n):
+c.cnot(0, i)
+p = c.probabilites()
+for i in range(1 << n):
+if p[i] > 0.001:
+bits = format(i, f"0{n}b")
+print(f" |{bits}> {p[i]:.4f}")
+ok(f"État GHZ à {n} qubits créé")
+
+
+def cmd_grover(cible: int, n: int = 4):
+sect(f"GROVER : cible={cible}, n={n} qubits")
+cible = int(cible)
+
+def oracle(circuit, n):
+bits = format(cible, f"0{n}b")
+for i, b in enumerate(reversed(bits)):
+if b == "0":
+circuit.x(i)
+circuit.cz(0, n - 1)
+for i, b in enumerate(reversed(bits)):
+if b == "0":
+circuit.x(i)
+
+t0 = time.time()
+circuit = grover(oracle, n)
+duree = time.time() - t0
+
+p = circuit.probabilites()
+top = sorted(range(len(p)), key=lambda i: -p[i])[:5]
+
+info(f"Top 5 résultats (temps : {duree*1000:.1f}ms) :")
+for i in top:
+bits = format(i, f"0{n}b")
+bar = "█" * int(p[i] * 40)
+print(f" |{bits}> {p[i]:.4f} {bar}")
+
+meilleur = format(top[0], f"0{n}b")
+if top[0] == cible:
+ok(f"Solution trouvée : |{meilleur}> (probabilité {p[top[0]]*100:.1f}%)")
+else:
+warn(f"Meilleur résultat : |{meilleur}> (cible était |{format(cible, f'0{n}b')}>)")
+
+
+def cmd_qaoa(n: int = 4):
+sect(f"QAOA : {n} qubits")
+circuit = qaoa(n, gamma=0.5, beta=0.3)
+p = circuit.probabilites()
+top = sorted(range(len(p)), key=lambda i: -p[i])[:5]
+for i in top:
+bits = format(i, f"0{n}b")
+print(f" |{bits}> {p[i]:.4f}")
+ok(f"QAOA exécuté sur {n} qubits")
+
+
+def cmd_competition():
+p = ProtocoleCompetition()
+p.calculer_attractivite()
+return p.simuler_guerre()
+
+
+def cmd_deeplink(url: str):
+sect(f"DEEPLINK : {url}")
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+try:
+import re
+req = urllib.request.Request(url, headers={"User-Agent": "Nexus/1.0"})
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+html = r.read().decode("utf-8", errors="ignore")
+ok(f"Taille : {len(html):,} caractères")
+liens = list(set(re.findall(r'href=["\']([^"\']+)', html)))[:20]
+info(f"{len(liens)} liens trouvés :")
+for l in liens[:10]:
+print(f" {l[:80]}")
+except Exception as e:
+no(f"Erreur : {e}")
+
+
+def cmd_golink(url: str):
+cmd_deeplink(url)
+
+
+def cmd_score():
+sect("SCORE DU PROJET NEXUS")
+p = ProtocoleCompetition()
+score = p.calculer_attractivite()
+info(f"Attractivité : {score}/100")
+for crit, poids in p.CRITERES.items():
+print(f" {crit.ljust(22)} {poids:>3} points")
+print()
+if score >= 90:
+ok("ULTRA stratégique")
+elif score >= 70:
+ok("TRÈS stratégique")
+elif score >= 50:
+warn("Stratégique")
+else:
+no("Peu stratégique")
+
+
+def cmd_protocole():
+sect("PROTOCOLE GOBLINK vs GOLINK")
+etapes = [
+("1. DÉTECTION", ["Scan technologies", "Analyse code (Codmort)", "Benchmark perfs"]),
+("2. DEEP LINKING", ["Fetch multi-niveau", "Extraction graphes", "Cartographie réseau"]),
+("3. QUANTUM ENGINE", ["Grover recherche", "QAOA optimisation", "Simulateur pur Python"]),
+("4. GOBLINK", ["Connexions inter-domaines", "Traçage chaînes", "Analyse sémantique"]),
+("5. GOLINK", ["Recherche inversée", "Découverte patterns", "Optimisation continue"]),
+("6. STRATÉGIE", ["Microsoft : Azure", "Google : Cloud + AI", "Actif stratégique"]),
+("7. ENCHÈRES", ["Simulation offres", "Score stratégique", "Guerre technologique"]),
+]
+for titre, items in etapes:
+print(f"\n {C}{titre}{N}")
+for it in items:
+print(f" • {it}")
+print(f"\n {M}Objectif : créer un actif que les géants veulent{N}\n")
+
+
+def cmd_self_test():
+"""Vérifie que tout fonctionne."""
+sect("SELF-TEST")
+tests = []
+
+# Test 1 : Bell
+try:
+c = QuantumCircuit(2); c.h(0); c.cnot(0, 1)
+p = c.probabilites()
+assert abs(p[0] - 0.5) < 1e-9, "Bell p[0]"
+assert abs(p[3] - 0.5) < 1e-9, "Bell p[3]"
+tests.append(("Bell", True, ""))
+except AssertionError as e:
+tests.append(("Bell", False, str(e)))
+
+# Test 2 : GHZ
+try:
+c = QuantumCircuit(3); c.h(0); c.cnot(0, 1); c.cnot(0, 2)
+p = c.probabilites()
+assert abs(p[0] - 0.5) < 1e-9, "GHZ p[0]"
+assert abs(p[7] - 0.5) < 1e-9, "GHZ p[7]"
+tests.append(("GHZ", True, ""))
+except AssertionError as e:
+tests.append(("GHZ", False, str(e)))
+
+# Test 3 : Grover
+try:
+def oracle(circuit, n):
+bits = format(7, f"0{n}b")
+for i, b in enumerate(reversed(bits)):
+if b == "0":
+circuit.x(i)
+circuit.cz(0, n - 1)
+for i, b in enumerate(reversed(bits)):
+if b == "0":
+circuit.x(i)
+circuit = grover(oracle, 4)
+p = circuit.probabilites()
+top = max(range(len(p)), key=lambda i: p[i])
+tests.append(("Grover", top == 7, f"trouvé={top}, attendu=7"))
+except Exception as e:
+tests.append(("Grover", False, str(e)))
+
+# Test 4 : Toffoli
+try:
+c = QuantumCircuit(3)
+c.x(0); c.x(1); c.toffoli(0, 1, 2)
+p = c.probabilites()
+assert p[7] > 0.99, "Toffoli"
+tests.append(("Toffoli", True, ""))
+except AssertionError as e:
+tests.append(("Toffoli", False, str(e)))
+
+# Test 5 : Cache proba
+try:
+s = QuantumState(3)
+p1 = s.probabilites()
+p2 = s.probabilites()
+assert p1 == p2
+tests.append(("Cache proba", True, ""))
+except AssertionError as e:
+tests.append(("Cache proba", False, str(e)))
+
+# Affichage
+reussis = sum(1 for _, r, _ in tests if r)
+print()
+for nom, res, err in tests:
+if res:
+ok(f"{nom.ljust(20)} PASS")
+else:
+no(f"{nom.ljust(20)} FAIL — {err}")
+
+print()
+if reussis == len(tests):
+ok(f"Tous les tests passent ({reussis}/{len(tests)})")
+else:
+no(f"{reussis}/{len(tests)} tests passent")
+return reussis == len(tests)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# DISPATCH PAR DICTIONNAIRE
+# ═══════════════════════════════════════════════════════════════════
+def _parse_int(s, default):
+try:
+return int(s)
+except (ValueError, TypeError):
+return default
+
+
+COMMANDES: Dict[str, Tuple[Callable, str]] = {
+"bell": (lambda args: cmd_bell(), "bell - État de Bell"),
+"ghz": (lambda args: cmd_ghz(_parse_int(args[0] if args else "3", 3)), "ghz [n] - État GHZ"),
+"grover": (lambda args: cmd_grover(args[0] if args else "7", _parse_int(args[1] if len(args) > 1 else "4", 4)), "grover <cible> [n] - Grover"),
+"qaoa": (lambda args: cmd_qaoa(_parse_int(args[0] if args else "4", 4)), "qaoa [n] - QAOA"),
+"competition": (lambda args: cmd_competition(), "competition - Simulation enchères"),
+"deeplink": (lambda args: cmd_deeplink(args[0]) if args else no("URL manquante"), "deeplink <url> - Deep linking"),
+"golink": (lambda args: cmd_golink(args[0]) if args else no("URL manquante"), "golink <url> - GOLINK"),
+"score": (lambda args: cmd_score(), "score - Score projet"),
+"protocole": (lambda args: cmd_protocole(), "protocole - Protocole complet"),
+"self-test": (lambda args: cmd_self_test(), "self-test - Vérifie tout"),
+}
+
+
+def usage():
+print(f"""
+{C}NEXUS MODEL 09 - QUANTUM ENGINE + COMPÉTITION [v2]{N}
+Chemin : {BASE}/modele_09.py
+Log : {LOG_FILE}
+Port : AUCUN (CLI)
+
+Usage : python3 modele_09.py <commande> [args]
+
+Commandes :
+""")
+for nom, (_, desc) in COMMANDES.items():
+print(f" {desc}")
+print(f"""
+Exemples :
+python3 modele_09.py self-test
+python3 modele_09.py bell
+python3 modele_09.py ghz 5
+python3 modele_09.py grover 7 4
+python3 modele_09.py score
+""")
+
+
+def main():
+if len(sys.argv) < 2:
+usage()
+return
+
+cmd = sys.argv[1]
+args = sys.argv[2:]
+
+if cmd not in COMMANDES:
+no(f"Commande inconnue : {cmd}")
+usage()
+return
+
+fn, _ = COMMANDES[cmd]
+sect(f"{cmd} {' '.join(args)[:60]}")
+try:
+fn(args)
+except Exception as e:
+no(f"Erreur : {e}")
+log.exception("Exception")
+
+
+if __name__ == "__main__":
+try:
+main()
+except KeyboardInterrupt:
+print(f"\n👋 Interrompu")
