@@ -1,0 +1,713 @@
+#!/usr/bin/env python3# -*- coding: utf-8 -*-
+"""
+🧬 NEXUS MODEL 01 — SCANNER RÉSEAU
+CreWos Sybot — Étape 1/10
+
+Chemin : ~/Documents/nexus_autonome/modele_01.py
+Port : 9002
+
+Fonctions :
+- Scan réseau local (détection appareils)
+- Port scan (TCP connect)
+- DNS lookup
+- HTTP status check
+- Ping (via socket)
+- Whois basique
+- Test latency
+- IP publique
+- Interface web pour tout piloter
+
+Lance :
+python3 ~/Documents/nexus_autonome/modele_01.py
+"""
+
+import os
+import sys
+import ssl
+import re
+import json
+import time
+import socket
+import struct
+import threading
+import subprocess
+import urllib.request
+import urllib.error
+import http.server
+import socketserver
+from pathlib import Path
+from datetime import datetime
+from urllib.parse import urlparse, quote
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════════════════
+PORT = 9002
+HOST = "0.0.0.0"
+BASE = Path.home() / "Documents" / "nexus_autonome"
+BASE.mkdir(parents=True, exist_ok=True)
+LOGS = BASE / "logs"
+LOGS.mkdir(exist_ok=True)
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+HEADERS = {
+'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',
+'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
+}
+
+# Couleurs terminal
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'; B = '\033[94m'; C = '\033[96m'; M = '\033[95m'; N = '\033[0m'
+def ok(m): print(f"{V}✅{N} {m}")
+def no(m): print(f"{R}❌{N} {m}")
+def warn(m): print(f"{J}⚠️ {N} {m}")
+def info(m): print(f"{B}ℹ️ {N} {m}")
+def sect(m): print(f"\n{C}{'═'*64}{N}\n{C} {m}{N}\n{C}{'═'*64}{N}\n")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# TOOLS — Fonctions de scan
+# ═══════════════════════════════════════════════════════════════════
+TOOLS = {}
+
+def tool(nom, desc):
+def wrapper(fn):
+TOOLS[nom] = {"fn": fn, "desc": desc}
+return fn
+return wrapper
+
+
+# ─── TOOL 1 : IP locale ───
+@tool("ip_locale", "Renvoie l'IP locale de la machine")
+def t_ip_locale():
+try:
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect(("8.8.8.8", 80))
+ip = s.getsockname()[0]
+s.close()
+return {"ip": ip, "hostname": socket.gethostname()}
+except Exception as e:
+return {"erreur": str(e)}
+
+
+# ─── TOOL 2 : IP publique ───
+@tool("ip_publique", "Renvoie l'IP publique")
+def t_ip_publique():
+try:
+req = urllib.request.Request("https://api.ipify.org?format=json", headers=HEADERS)
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+return json.loads(r.read())
+except Exception as e:
+try:
+req = urllib.request.Request("http://ip-api.com/json", headers=HEADERS)
+with urllib.request.urlopen(req, timeout=10) as r:
+return json.loads(r.read())
+except Exception:
+return {"erreur": str(e)}
+
+
+# ─── TOOL 3 : Ping (TCP) ───
+@tool("ping", "Test de connectivité TCP sur un port")
+def t_ping(host, port=80, timeout=3):
+debut = time.time()
+try:
+s = socket.create_connection((host, int(port)), timeout=timeout)
+s.close()
+duree = (time.time() - debut) * 1000
+return {"host": host, "port": port, "ok": True, "ms": round(duree, 2)}
+except Exception as e:
+return {"host": host, "port": port, "ok": False, "erreur": str(e)[:80]}
+
+
+# ─── TOOL 4 : Port scan ───
+@tool("port_scan", "Scan de ports TCP sur une cible")
+def t_port_scan(host, ports=None):
+if ports is None:
+ports = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 993, 995,
+3306, 3389, 5432, 5900, 6379, 8080, 8443, 9000, 9001,
+9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011]
+resultats = {}
+def check(p):
+try:
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.8)
+r = s.connect_ex((host, p))
+s.close()
+return p, (r == 0)
+except Exception:
+return p, False
+
+with ThreadPoolExecutor(max_workers=50) as ex:
+futures = [ex.submit(check, p) for p in ports]
+for f in as_completed(futures):
+p, ouvert = f.result()
+resultats[p] = ouvert
+
+return {
+"host": host,
+"total": len(ports),
+"ouverts": [p for p, o in resultats.items() if o],
+"fermes": [p for p, o in resultats.items() if not o],
+}
+
+
+# ─── TOOL 5 : DNS lookup ───
+@tool("dns_lookup", "Résolution DNS d'un nom de domaine")
+def t_dns_lookup(host):
+try:
+ip = socket.gethostbyname(host)
+try:
+infos = socket.gethostbyname_ex(host)
+aliases = infos[1]
+ips = infos[2]
+except Exception:
+aliases = []
+ips = [ip]
+return {"host": host, "ip": ip, "aliases": aliases, "toutes_ips": ips}
+except Exception as e:
+return {"host": host, "erreur": str(e)}
+
+
+# ─── TOOL 6 : DNS reverse ───
+@tool("dns_reverse", "Reverse DNS (IP vers hostname)")
+def t_dns_reverse(ip):
+try:
+host = socket.gethostbyaddr(ip)
+return {"ip": ip, "hostname": host[0], "aliases": host[1]}
+except Exception as e:
+return {"ip": ip, "erreur": str(e)}
+
+
+# ─── TOOL 7 : HTTP status ───
+@tool("http_status", "Vérifie le code HTTP d'une URL")
+def t_http_status(url):
+try:
+req = urllib.request.Request(url, headers=HEADERS, method="HEAD")
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+return {
+"url": url,
+"code": r.status,
+"serveur": r.headers.get("Server", "?"),
+"type": r.headers.get("Content-Type", "?"),
+"taille": r.headers.get("Content-Length", "?"),
+}
+except urllib.error.HTTPError as e:
+return {"url": url, "code": e.code, "raison": str(e)[:80]}
+except Exception as e:
+return {"url": url, "erreur": str(e)[:80]}
+
+
+# ─── TOOL 8 : Latency test ───
+@tool("latency", "Test de latence (moyenne sur N essais)")
+def t_latency(host, port=443, n=5):
+temps = []
+for _ in range(n):
+debut = time.time()
+try:
+s = socket.create_connection((host, int(port)), timeout=3)
+s.close()
+temps.append((time.time() - debut) * 1000)
+except Exception:
+pass
+if not temps:
+return {"host": host, "erreur": "Aucun test réussi"}
+return {
+"host": host,
+"port": port,
+"essais": n,
+"reussis": len(temps),
+"min_ms": round(min(temps), 2),
+"max_ms": round(max(temps), 2),
+"moy_ms": round(sum(temps) / len(temps), 2),
+}
+
+
+# ─── TOOL 9 : Scan réseau local ───
+@tool("scan_lan", "Détecte les appareils sur le réseau local")
+def t_scan_lan(subnet=None):
+if not subnet:
+ip = t_ip_locale().get("ip", "192.168.1.1")
+parts = ip.split(".")
+subnet = f"{parts[0]}.{parts[1]}.{parts[2]}"
+
+def ping_ip(i):
+ip = f"{subnet}.{i}"
+try:
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.3)
+r = s.connect_ex((ip, 80))
+s.close()
+if r == 0:
+return ip
+except Exception:
+pass
+try:
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.3)
+r = s.connect_ex((ip, 443))
+s.close()
+if r == 0:
+return ip
+except Exception:
+pass
+try:
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.3)
+r = s.connect_ex((ip, 22))
+s.close()
+if r == 0:
+return ip
+except Exception:
+pass
+return None
+
+actifs = []
+with ThreadPoolExecutor(max_workers=100) as ex:
+futures = [ex.submit(ping_ip, i) for i in range(1, 255)]
+for f in as_completed(futures):
+r = f.result()
+if r:
+actifs.append(r)
+
+return {
+"subnet": f"{subnet}.0/24",
+"appareils_detectes": sorted(actifs),
+"total": len(actifs),
+}
+
+
+# ─── TOOL 10 : Whois basique (via API) ───
+@tool("whois", "Info basique sur un domaine (via API)")
+def t_whois(domaine):
+try:
+url = f"https://rdap.org/domain/{domaine}"
+req = urllib.request.Request(url, headers=HEADERS)
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+data = json.loads(r.read())
+events = data.get("events", [])
+dates = {}
+for e in events:
+dates[e.get("eventAction", "?")] = e.get("eventDate", "?")
+noms = []
+for e in data.get("entities", []):
+for v in e.get("vcardArray", [[]])[1] if isinstance(e.get("vcardArray"), list) else []:
+if v and v[0] == "fn":
+noms.append(v[3])
+return {"domaine": domaine, "dates": dates, "contacts": noms}
+except Exception as e:
+return {"domaine": domaine, "erreur": str(e)[:100]}
+
+
+# ─── TOOL 11 : Test HTTP headers sécurité ───
+@tool("security_headers", "Vérifie les headers de sécurité d'une URL")
+def t_security_headers(url):
+try:
+req = urllib.request.Request(url, headers=HEADERS, method="HEAD")
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+headers = dict(r.headers)
+securite = [
+"Strict-Transport-Security",
+"Content-Security-Policy",
+"X-Frame-Options",
+"X-Content-Type-Options",
+"Referrer-Policy",
+"Permissions-Policy",
+]
+resultat = {}
+for h in securite:
+resultat[h] = headers.get(h, "❌ ABSENT")
+return {"url": url, "headers": resultat, "tous": headers}
+except Exception as e:
+return {"url": url, "erreur": str(e)[:80]}
+
+
+# ─── TOOL 12 : Traceroute simple ───
+@tool("traceroute", "Trace le chemin réseau vers une cible")
+def t_traceroute(host, max_hops=10):
+hops = []
+try:
+ip = socket.gethostbyname(host)
+except Exception as e:
+return {"erreur": str(e)}
+
+for ttl in range(1, max_hops + 1):
+try:
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+s.setsockopt(socket.SOL_IP, socket.IP_TTL, ttl)
+s.settimeout(1)
+s.sendto(b"", (ip, 33434))
+try:
+_, addr = s.recvfrom(512)
+hops.append({"ttl": ttl, "ip": addr[0]})
+except socket.timeout:
+hops.append({"ttl": ttl, "ip": "*"})
+s.close()
+except Exception:
+break
+
+return {"host": host, "ip": ip, "hops": hops}
+
+
+# ─── TOOL 13 : SSL certificate info ───
+@tool("ssl_info", "Infos sur le certificat SSL d'un domaine")
+def t_ssl_info(host, port=443):
+try:
+s = socket.create_connection((host, port), timeout=5)
+ctx_ssl = ssl.create_default_context()
+ctx_ssl.check_hostname = False
+ctx_ssl.verify_mode = ssl.CERT_NONE
+ss = ctx_ssl.wrap_socket(s, server_hostname=host)
+cert = ss.getpeercert()
+ss.close()
+return {
+"host": host,
+"sujet": dict(x[0] for x in cert.get("subject", [])),
+"emetteur": dict(x[0] for x in cert.get("issuer", [])),
+"valide_du": cert.get("notBefore", "?"),
+"valide_au": cert.get("notAfter", "?"),
+"version": cert.get("version", "?"),
+}
+except Exception as e:
+return {"host": host, "erreur": str(e)[:100]}
+
+
+# ─── TOOL 14 : Bannière de service ───
+@tool("banner", "Récupère la bannière d'un service")
+def t_banner(host, port):
+try:
+s = socket.create_connection((host, int(port)), timeout=5)
+s.settimeout(3)
+try:
+s.send(b"\r\n")
+data = s.recv(1024)
+s.close()
+return {"host": host, "port": port, "banniere": data.decode("utf-8", errors="ignore")[:200]}
+except Exception:
+s.close()
+return {"host": host, "port": port, "banniere": ""}
+except Exception as e:
+return {"host": host, "port": port, "erreur": str(e)[:80]}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# INTERFACE WEB
+# ═══════════════════════════════════════════════════════════════════
+INDEX_HTML = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🧬 NEXUS — Modèle 01 : Scanner Réseau</title>
+<style>
+:root {
+--primaire: #c8a45c;
+--secondaire: #ff6ec7;
+--accent: #00d4ff;
+--fond: #0a0014;
+--card: #14001f;
+--border: #2a1a3a;
+--texte: #fff;
+--muted: #888;
+--vert: #4ade80;
+--rouge: #f87171;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+font-family: -apple-system, "SF Pro Display", Inter, system-ui, sans-serif;
+background: var(--fond); color: var(--texte);
+min-height: 100vh; padding: 32px;
+background-image: radial-gradient(ellipse at top, rgba(200,164,92,0.08), transparent 60%);
+}
+header {
+max-width: 1200px; margin: 0 auto 40px;
+display: flex; justify-content: space-between; align-items: center;
+}
+.logo { font-size: 24px; font-weight: 700; letter-spacing: -1px; }
+.logo span { color: var(--primaire); }
+.badge {
+background: rgba(200,164,92,0.15);
+border: 1px solid var(--primaire);
+padding: 6px 14px; border-radius: 999px;
+font-size: 11px; color: var(--primaire);
+text-transform: uppercase; letter-spacing: 1px;
+}
+h1 {
+font-size: clamp(36px, 6vw, 64px);
+font-weight: 700; letter-spacing: -3px;
+background: linear-gradient(135deg, #fff 0%, var(--primaire) 50%, var(--secondaire) 100%);
+-webkit-background-clip: text; -webkit-text-fill-color: transparent;
+margin-bottom: 8px;
+animation: fadeUp 0.6s ease;
+}
+.subtitle { color: var(--muted); font-size: 16px; margin-bottom: 40px; animation: fadeUp 0.6s ease 0.1s both; }
+.stats { display:flex; gap:32px; margin-bottom:40px; flex-wrap:wrap; animation: fadeUp 0.6s ease 0.2s both; }
+.stat { text-align:center; }
+.stat .num { font-size: 36px; font-weight: 700; color: var(--primaire); display: block; line-height:1; }
+.stat .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 2px; color: var(--muted); margin-top:6px; display:block; }
+.grid {
+display: grid;
+grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+gap: 20px; max-width: 1200px; margin: 0 auto;
+}
+.card {
+background: var(--card); border: 1px solid var(--border);
+border-radius: 16px; padding: 20px;
+transition: all 0.3s cubic-bezier(0.4,0,0.2,1);
+animation: fadeUp 0.6s ease;
+position: relative; overflow: hidden;
+}
+.card::before {
+content: '';
+position: absolute; top: 0; left: 0; right: 0;
+height: 2px;
+background: linear-gradient(90deg, transparent, var(--primaire), transparent);
+opacity: 0; transition: opacity 0.3s;
+}
+.card:hover { transform: translateY(-4px); border-color: var(--primaire); box-shadow: 0 20px 40px rgba(200,164,92,0.15); }
+.card:hover::before { opacity: 1; }
+.card h3 { color: var(--primaire); font-size: 15px; margin-bottom: 6px; font-family: "SF Mono", Menlo, monospace; }
+.card .desc { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+.card input, .card select {
+width: 100%; padding: 10px 14px;
+background: rgba(0,0,0,0.4); border: 1px solid var(--border);
+border-radius: 8px; color: var(--texte);
+font-size: 13px; margin-bottom: 10px;
+font-family: "SF Mono", monospace;
+outline: none;
+}
+.card input:focus { border-color: var(--primaire); }
+.card button {
+width: 100%; padding: 12px;
+background: var(--primaire); color: #000;
+border: none; border-radius: 8px;
+font-weight: 600; font-size: 13px;
+cursor: pointer; transition: all 0.2s;
+}
+.card button:hover { transform: scale(1.02); box-shadow: 0 8px 20px rgba(200,164,92,0.4); }
+.card button:disabled { opacity: 0.5; cursor: wait; }
+.resultat {
+margin-top: 12px; padding: 12px;
+background: rgba(0,0,0,0.5);
+border-radius: 8px; font-family: "SF Mono", monospace;
+font-size: 11px; color: #d0d0d0;
+max-height: 200px; overflow-y: auto;
+white-space: pre-wrap; word-break: break-all;
+border-left: 2px solid var(--primaire);
+display: none;
+}
+.resultat.visible { display: block; animation: fadeUp 0.3s ease; }
+.resultat .ok { color: var(--vert); }
+.resultat .ko { color: var(--rouge); }
+footer {
+text-align: center; margin-top: 80px; padding-top: 40px;
+border-top: 1px solid var(--border);
+color: var(--muted); font-size: 12px;
+max-width: 1200px; margin-left: auto; margin-right: auto;
+}
+@keyframes fadeUp { from { opacity:0; transform: translateY(15px); } to { opacity:1; transform: none; } }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+.pulse { animation: pulse 2s infinite; }
+</style>
+</head>
+<body>
+
+<header>
+<div class="logo">NEXUS<span>.</span></div>
+<div class="badge pulse">Modèle 01 · Port 9002</div>
+</header>
+
+<h1>Scanner Réseau</h1>
+<p class="subtitle">14 tools pour analyser, tester et cartographier le réseau.</p>
+
+<div class="stats">
+<div class="stat"><span class="num" id="nb-tools">0</span><span class="lbl">Tools</span></div>
+<div class="stat"><span class="num">9002</span><span class="lbl">Port</span></div>
+<div class="stat"><span class="num" id="uptime">0s</span><span class="lbl">Uptime</span></div>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<footer>
+🧬 NEXUS Model 01 — Scanner Réseau · CreWos Sybot<br>
+Chemin : ~/Documents/nexus_autonome/modele_01.py
+</footer>
+
+<script>
+const TOOLS_INFO = __TOOLS_INFO__;
+const grid = document.getElementById('grid');
+document.getElementById('nb-tools').textContent = Object.keys(TOOLS_INFO).length;
+
+const icones = {
+ip_locale: "🏠", ip_publique: "🌍", ping: "📡", port_scan: "🚪",
+dns_lookup: "🔗", dns_reverse: "↩️", http_status: "✅", latency: "⏱️",
+scan_lan: "🔍", whois: "📋", security_headers: "🔒", traceroute: "🛤️",
+ssl_info: "🔐", banner: "🏴"
+};
+
+const placeholders = {
+ip_locale: null, ip_publique: null,
+ping: "8.8.8.8 443", port_scan: "192.168.1.42",
+dns_lookup: "github.com", dns_reverse: "8.8.8.8",
+http_status: "https://example.com", latency: "1.1.1.1 443",
+scan_lan: "192.168.1", whois: "example.com",
+security_headers: "https://github.com", traceroute: "8.8.8.8",
+ssl_info: "github.com", banner: "google.com 80"
+};
+
+Object.entries(TOOLS_INFO).forEach(([nom, desc], i) => {
+const card = document.createElement('div');
+card.className = 'card';
+card.style.animationDelay = (i * 0.05) + 's';
+
+const ph = placeholders[nom];
+const inputHtml = ph ? `<input class="input" placeholder="${ph}">` : '';
+
+card.innerHTML = `
+<h3>${icones[nom] || '🔧'} ${nom}</h3>
+<div class="desc">${desc}</div>
+${inputHtml}
+<button onclick="executer('${nom}', this)">Lancer</button>
+<div class="resultat" id="res-${nom}"></div>
+`;
+grid.appendChild(card);
+});
+
+async function executer(nom, btn) {
+const card = btn.closest('.card');
+const input = card.querySelector('.input');
+const res = card.querySelector('.resultat');
+
+const args = input ? input.value.trim().split(/\s+/) : [];
+
+btn.disabled = true;
+btn.textContent = 'En cours...';
+res.classList.add('visible');
+res.textContent = '⏳ Exécution...';
+
+try {
+const r = await fetch('/api/tool/' + nom, {
+method: 'POST',
+headers: {'Content-Type':'application/json'},
+body: JSON.stringify({args: args})
+});
+const data = await r.json();
+res.textContent = JSON.stringify(data, null, 2);
+} catch (e) {
+res.textContent = '❌ Erreur : ' + e.message;
+} finally {
+btn.disabled = false;
+btn.textContent = 'Lancer';
+}
+}
+
+const t0 = Date.now();
+setInterval(() => {
+document.getElementById('uptime').textContent =
+Math.floor((Date.now() - t0) / 1000) + 's';
+}, 1000);
+</script>
+</body>
+</html>"""
+
+
+# ═══════════════════════════════════════════════════════════════════
+# HANDLER HTTP
+# ═══════════════════════════════════════════════════════════════════
+class Handler(http.server.BaseHTTPRequestHandler):
+def do_GET(self):
+path = self.path.split("?")[0]
+if path == "/" or path == "/index.html":
+tools_info = {k: v["desc"] for k, v in TOOLS.items()}
+html = INDEX_HTML.replace("__TOOLS_INFO__", json.dumps(tools_info, ensure_ascii=False))
+self._html(html)
+elif path == "/api/tools":
+self._json({k: v["desc"] for k, v in TOOLS.items()})
+elif path == "/api/ping":
+self._json({"status": "ok", "port": PORT, "tools": len(TOOLS)})
+else:
+self._404()
+
+def do_POST(self):
+path = self.path.split("?")[0]
+if path.startswith("/api/tool/"):
+nom = path[10:]
+if nom not in TOOLS:
+self._json({"erreur": "tool inconnu"}); return
+try:
+length = int(self.headers.get("Content-Length", 0))
+body = self.rfile.read(length).decode() if length else "{}"
+data = json.loads(body)
+args = data.get("args", [])
+fn = TOOLS[nom]["fn"]
+try:
+resultat = fn(*args)
+except TypeError as e:
+resultat = {"erreur": f"Arguments invalides : {e}"}
+self._json(resultat)
+except Exception as e:
+self._json({"erreur": str(e)})
+else:
+self._404()
+
+def _html(self, content):
+self.send_response(200)
+self.send_header("Content-Type", "text/html; charset=utf-8")
+self.end_headers()
+self.wfile.write(content.encode("utf-8"))
+
+def _json(self, data):
+self.send_response(200)
+self.send_header("Content-Type", "application/json")
+self.send_header("Access-Control-Allow-Origin", "*")
+self.end_headers()
+self.wfile.write(json.dumps(data, indent=2, ensure_ascii=False).encode())
+
+def _404(self):
+self.send_response(404); self.end_headers()
+self.wfile.write(b"404")
+
+def log_message(self, *a): pass
+
+
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+daemon_threads = True
+allow_reuse_address = True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════════
+def main():
+print(f"""
+{M}╔════════════════════════════════════════════════════════════════╗
+║ 🧬 NEXUS MODEL 01 — SCANNER RÉSEAU ║
+║ CreWos Sybot — Étape 1/10 ║
+╚════════════════════════════════════════════════════════════════╝{N}
+""")
+info(f"Chemin : {BASE}/modele_01.py")
+info(f"Tools : {len(TOOLS)}")
+print()
+for nom, info_t in TOOLS.items():
+print(f" 🔧 {nom.ljust(18)} — {info_t['desc']}")
+print()
+ok(f"Serveur : http://192.168.1.42:{PORT}/")
+info(f"API : http://192.168.1.42:{PORT}/api/tools")
+print()
+warn("Ctrl+C pour arrêter")
+
+try:
+with Server((HOST, PORT), Handler) as srv:
+srv.serve_forever()
+except KeyboardInterrupt:
+print("\n👋 Arrêté.")
+except OSError as e:
+no(f"Port {PORT} : {e}")
+
+
+if __name__ == "__main__":
+main()
