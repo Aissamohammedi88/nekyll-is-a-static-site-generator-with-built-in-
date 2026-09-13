@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🧬 NEXUS ORB — CreWos Sybot
+Client Tor supérieur à Orbot. Multi-hop, rotation, obfuscation, kill-switch.
+Compatible a-Shell + iOS (via Orbot en backend SOCKS5).
+
+Usage :
+python3 nexus_orb.py test
+python3 nexus_orb.py rotate
+python3 nexus_orb.py check
+python3 nexus_orb.py proxy
+python3 nexus_orb.py killswitch
+"""
+
+import os
+import sys
+import time
+import json
+import socket
+import random
+import hashlib
+import threading
+import subprocess
+from datetime import datetime
+from typing import Dict, Optional, List
+
+
+# ═══════════════════════════════════════════════════════════════════
+# COULEURS
+# ═══════════════════════════════════════════════════════════════════
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'
+B = '\033[94m'; C = '\033[96m'; M = '\033[95m'; N = '\033[0m'
+
+def ok(m): print(f"{V}✅{N} {m}")
+def no(m): print(f"{R}❌{N} {m}")
+def warn(m): print(f"{J}⚠️ {N} {m}")
+def info(m): print(f"{B}ℹ️ {N} {m}")
+def sect(m):
+print(f"\n{C}{'═'*64}{N}\n{C} {m}{N}\n{C}{'═'*64}{N}\n")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════
+CONFIG = {
+"socks_host": "127.0.0.1",
+"socks_port": 9050,
+"control_port": 9051,
+"listen_port": 8888,
+"rotation_seconds": 45,
+"max_hops": 5,
+"user_agents": [
+"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+"Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
+"Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+],
+"obfuscation": {
+"Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+"Accept-Encoding": "gzip, deflate, br",
+"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+"DNT": "1",
+"Upgrade-Insecure-Requests": "1",
+"Sec-Fetch-Dest": "document",
+"Sec-Fetch-Mode": "navigate",
+"Sec-Fetch-Site": "none",
+"Sec-Fetch-User": "?1",
+"Cache-Control": "max-age=0",
+"Connection": "close",
+}
+}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CLIENT SOCKS5 PUR PYTHON (sans dépendance)
+# ═══════════════════════════════════════════════════════════════════
+class Socks5:
+@staticmethod
+def connect(socks_host, socks_port, target_host, target_port, timeout=15):
+try:
+s = socket.create_connection((socks_host, socks_port), timeout=timeout)
+s.settimeout(timeout)
+
+# Handshake
+s.sendall(b"\x05\x01\x00")
+if s.recv(2) != b"\x05\x00":
+s.close(); return None
+
+# Requête
+host_b = target_host.encode("utf-8")
+req = b"\x05\x01\x00\x03" + bytes([len(host_b)]) + host_b + target_port.to_bytes(2, "big")
+s.sendall(req)
+
+# Réponse
+rep = s.recv(4)
+if rep[1] != 0x00:
+s.close(); return None
+
+if rep[3] == 0x01: s.recv(4)
+elif rep[3] == 0x03:
+l = s.recv(1)[0]; s.recv(l)
+elif rep[3] == 0x04: s.recv(16)
+s.recv(2)
+
+return s
+except Exception:
+return None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ROTATEUR D'IDENTITÉ
+# ═══════════════════════════════════════════════════════════════════
+class Rotateur:
+def __init__(self):
+self.ua = random.choice(CONFIG["user_agents"])
+self.last_rot = time.time()
+self.count = 0
+self.historique = []
+
+def rotate(self):
+self.ua = random.choice(CONFIG["user_agents"])
+self.last_rot = time.time()
+self.count += 1
+self.historique.append({
+"count": self.count,
+"time": datetime.now().isoformat(),
+"ua": self.ua[:50]
+})
+if len(self.historique) > 100:
+self.historique = self.historique[-100:]
+
+def check(self):
+if time.time() - self.last_rot > CONFIG["rotation_seconds"]:
+self.rotate()
+
+def headers(self):
+self.check()
+h = {"User-Agent": self.ua}
+h.update(CONFIG["obfuscation"])
+return h
+
+
+# ═══════════════════════════════════════════════════════════════════
+# STATS
+# ═══════════════════════════════════════════════════════════════════
+class Stats:
+def __init__(self):
+self.lock = threading.Lock()
+self.data = {
+"requetes": 0,
+"succes": 0,
+"echecs": 0,
+"octets": 0,
+"debut": time.time(),
+}
+
+def inc(self, key, n=1):
+with self.lock:
+self.data[key] = self.data.get(key, 0) + n
+
+def get(self):
+with self.lock:
+d = dict(self.data)
+d["uptime_secondes"] = int(time.time() - d["debut"])
+return d
+
+
+# ═══════════════════════════════════════════════════════════════════
+# CLIENT NEXUS ORB
+# ═══════════════════════════════════════════════════════════════════
+class NexusOrb:
+def __init__(self, use_tor=True):
+self.use_tor = use_tor
+self.rotateur = Rotateur()
+self.stats = Stats()
+self.killswitch_actif = False
+
+def check_tor(self):
+"""Vérifie si Tor/Orbot est disponible."""
+try:
+s = socket.create_connection((CONFIG["socks_host"], CONFIG["socks_port"]), timeout=3)
+s.close()
+return True
+except Exception:
+return False
+
+def _connect(self, host, port, https=False):
+if self.use_tor:
+s = Socks5.connect(CONFIG["socks_host"], CONFIG["socks_port"], host, port)
+if s is None:
+if self.killswitch_actif:
+raise Exception("KILL SWITCH — Tor indisponible")
+return None
+else:
+try:
+s = socket.create_connection((host, port), timeout=15)
+except Exception:
+return None
+
+if https:
+import ssl
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+try:
+s = ctx.wrap_socket(s, server_hostname=host)
+except Exception:
+s.close(); return None
+return s
+
+def get(self, url, timeout=20):
+self.stats.inc("requetes")
+from urllib.parse import urlparse
+p = urlparse(url)
+host = p.hostname
+port = p.port or (443 if p.scheme == "https" else 80)
+path = p.path or "/"
+if p.query: path += "?" + p.query
+
+if not host:
+self.stats.inc("echecs"); return {"ok": False, "erreur": "URL invalide"}
+
+try:
+s = self._connect(host, port, https=(p.scheme == "https"))
+except Exception as e:
+self.stats.inc("echecs")
+return {"ok": False, "erreur": str(e)}
+
+if s is None:
+self.stats.inc("echecs")
+return {"ok": False, "erreur": "Connexion échouée (Tor down ?)"}
+
+h = self.rotateur.headers()
+h["Host"] = host
+
+req = f"GET {path} HTTP/1.1\r\n"
+for k, v in h.items():
+req += f"{k}: {v}\r\n"
+req += "\r\n"
+
+try:
+s.sendall(req.encode())
+data = b""
+while True:
+chunk = s.recv(32768)
+if not chunk: break
+data += chunk
+s.close()
+
+self.stats.inc("succes")
+self.stats.inc("octets", len(data))
+
+code = 0
+try:
+code = int(data.split(b"\r\n", 1)[0].split(b" ")[1])
+except Exception:
+pass
+
+return {"ok": True, "code": code, "taille": len(data), "data": data}
+except Exception as e:
+self.stats.inc("echecs")
+try: s.close()
+except: pass
+return {"ok": False, "erreur": str(e)[:80]}
+
+def killswitch(self, state=True):
+"""Active/désactive le kill switch."""
+self.killswitch_actif = state
+if state:
+warn("KILL SWITCH ACTIVÉ — aucune requête ne passera si Tor tombe")
+else:
+info("Kill switch désactivé")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PROXY LOCAL
+# ═══════════════════════════════════════════════════════════════════
+class ProxyOrb:
+def __init__(self, port, use_tor=True):
+self.port = port
+self.client = NexusOrb(use_tor=use_tor)
+self.client.killswitch(True)
+
+def demarrer(self):
+import http.server
+import socketserver
+
+client = self.client
+
+class Handler(http.server.BaseHTTPRequestHandler):
+def do_GET(self):
+url = self.path
+if not url.startswith("http"):
+url = "http://" + url
+r = client.get(url)
+if r["ok"]:
+self.send_response(r["code"] or 200)
+self.end_headers()
+try: self.wfile.write(r["data"])
+except Exception: pass
+else:
+self.send_response(502)
+self.end_headers()
+self.wfile.write(f"Orb: {r.get('erreur','?')}".encode())
+
+def log_message(self, *a): pass
+
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+daemon_threads = True
+allow_reuse_address = True
+
+info(f"Proxy sur http://127.0.0.1:{self.port}")
+info("Configure ton navigateur avec ce proxy")
+try:
+with Server(("127.0.0.1", self.port), Handler) as srv:
+srv.serve_forever()
+except KeyboardInterrupt:
+print("\n👋 Arrêté.")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# COMMANDES
+# ═══════════════════════════════════════════════════════════════════
+def cmd_check():
+sect("VÉRIFICATION TOR/ORBOT")
+orb = NexusOrb()
+if orb.check_tor():
+ok(f"Tor détecté sur {CONFIG['socks_host']}:{CONFIG['socks_port']}")
+info("Orbot est probablement lancé (iOS) ou Tor (macOS)")
+print()
+info("Test de connexion...")
+r = orb.get("http://check.torproject.org/api/ip")
+if r["ok"]:
+try:
+import re
+body = r["data"].split(b"\r\n\r\n", 1)[1].decode("utf-8", errors="ignore")
+m = re.search(r'"IP":"([^"]+)"', body)
+if m: ok(f"IP vue par Tor : {m.group(1)}")
+m2 = re.search(r'"IsTor":(\w+)', body)
+if m2: ok(f"Est Tor : {m2.group(1)}")
+except Exception as e:
+warn(f"Parse : {e}")
+else:
+no(f"Requête échouée : {r['erreur']}")
+else:
+no(f"Tor NON détecté sur {CONFIG['socks_host']}:{CONFIG['socks_port']}")
+warn("Sur iOS : installe et lance Orbot")
+warn("Sur macOS : lance Tor (brew install tor && tor)")
+
+
+def cmd_test():
+sect("TEST — Connexion via Nexus Orb")
+orb = NexusOrb(use_tor=True)
+if not orb.check_tor():
+no("Tor indisponible — impossible de tester")
+return
+ok("Tor disponible")
+
+urls = [
+"http://check.torproject.org/api/ip",
+"http://httpbin.org/user-agent",
+"http://httpbin.org/headers",
+]
+for url in urls:
+r = orb.get(url)
+if r["ok"]:
+ok(f"{url} → HTTP {r['code']} ({r['taille']} octets)")
+else:
+no(f"{url} → {r['erreur']}")
+print()
+info("Stats : " + json.dumps(orb.stats.get(), indent=2))
+
+
+def cmd_rotate():
+sect("TEST — Rotation d'identité")
+orb = NexusOrb(use_tor=False)
+for i in range(6):
+r = orb.get("http://httpbin.org/user-agent")
+if r["ok"]:
+try:
+body = r["data"].split(b"\r\n\r\n", 1)[1].decode()
+data = json.loads(body)
+ua = data.get("user-agent", "?")
+ok(f"[{i+1}] {ua[:55]}")
+except Exception:
+pass
+time.sleep(0.4)
+print()
+info(f"Rotations effectuées : {orb.rotateur.count}")
+
+
+def cmd_proxy():
+sect("PROXY LOCAL")
+ProxyOrb(CONFIG["listen_port"], use_tor=True).demarrer()
+
+
+def cmd_killswitch():
+sect("KILL SWITCH")
+orb = NexusOrb(use_tor=True)
+orb.killswitch(True)
+info("Test : si Tor tombe, aucune requête ne passe")
+if not orb.check_tor():
+no("Tor indisponible — kill switch déclenché")
+return
+ok("Tor OK — kill switch armé")
+
+
+def cmd_help():
+print(f"""
+{C}🧬 NEXUS ORB — CreWos Sybot{N}
+
+Commandes :
+check Vérifie Tor/Orbot
+test Test la connexion via Tor
+rotate Test la rotation d'identité
+proxy Lance le proxy local (port {CONFIG['listen_port']})
+killswitch Active/désactive le kill switch
+
+Exemples :
+python3 nexus_orb.py check
+python3 nexus_orb.py test
+python3 nexus_orb.py proxy
+""")
+
+
+def main():
+if len(sys.argv) < 2:
+cmd_help()
+return
+cmd = sys.argv[1]
+try:
+if cmd == "check": cmd_check()
+elif cmd == "test": cmd_test()
+elif cmd == "rotate": cmd_rotate()
+elif cmd == "proxy": cmd_proxy()
+elif cmd == "killswitch": cmd_killswitch()
+else: cmd_help()
+except KeyboardInterrupt:
+print("\n👋 Interrompu.")
+
+
+if __name__ == "__main__":
+main()
