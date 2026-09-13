@@ -1,0 +1,402 @@
+# ═══════════════════════════════════════════════════════════════════════
+# NEKYLL — Docker Build & Test
+# ═══════════════════════════════════════════════════════════════════════
+
+name: NEKYLL Docker
+
+on:
+push:
+branches: [ main ]
+tags: [ 'v*' ]
+workflow_dispatch:
+
+env:
+FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+docker:
+name: 🐳 Build & Test Docker
+runs-on: ubuntu-latest
+timeout-minutes: 15
+
+steps:
+- name: 📥 Checkout
+uses: actions/checkout@v4
+
+- name: 🐳 Setup Buildx
+uses: docker/setup-buildx-action@v3
+
+- name: 🔨 Build image
+run: |
+echo "════════════════════════════════════════════════════════════"
+echo " 🐳 Build Docker image"
+echo "════════════════════════════════════════════════════════════"
+docker build -t nekyll:test .
+docker images | grep nekyll
+
+- name: 🧪 Test container
+run: |
+echo "════════════════════════════════════════════════════════════"
+echo " 🧪 Test du conteneur"
+echo "════════════════════════════════════════════════════════════"
+docker run -d --name nekyll-test -p 8089:8089 nekyll:test
+sleep 5
+echo ""
+echo " Test / :"
+curl -sf http://localhost:8089/ | head -5 || echo "⚠️ Pas de réponse"
+echo ""
+echo " Test /health :"
+curl -sf http://localhost:8089/health || echo "⚠️ Pas de réponse"
+echo ""
+echo " Test /api/status :"
+curl -sf http://localhost:8089/api/status || echo "⚠️ Pas de réponse"
+echo ""
+docker logs nekyll-test
+docker stop nekyll-test
+docker rm nekyll-test
+
+- name: 📊 Docker stats
+run: |
+echo "════════════════════════════════════════════════════════════"
+echo " 📊 Statistiques image"
+echo "════════════════════════════════════════════════════════════"
+docker image inspect nekyll:test --format '{{.Size}}' | \
+awk '{print " Taille image : " $1 / 1024 / 1024 " Mo"}'
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# NEKYLL — Dockerfile
+# ═══════════════════════════════════════════════════════════════════════
+# Image ultra-légère pour NEKYLL.
+# Base : python:3.11-slim (Debian minimal)
+# Taille finale : ~150 Mo
+# ═══════════════════════════════════════════════════════════════════════
+
+FROM python:3.11-slim
+
+# Métadonnées
+LABEL maintainer="Aïssa Mohammedi <source2x1@protonmail.com>"
+LABEL description="NEKYLL — Static site generator with built-in 10 tools"
+LABEL version="1.0.0"
+
+# Variables d'environnement
+ENV PYTHONUNBUFFERED=1 \
+PYTHONDONTWRITEBYTECODE=1 \
+PIP_NO_CACHE_DIR=1 \
+PIP_DISABLE_PIP_VERSION_CHECK=1 \
+PORT=8089
+
+# Répertoire de travail
+WORKDIR /app
+
+# Installation des dépendances système
+RUN apt-get update && \
+apt-get install -y --no-install-recommends \
+curl \
+ca-certificates \
+gnupg \
+git \
+&& rm -rf /var/lib/apt/lists/*
+
+# Copie des fichiers de dépendances Python
+COPY requirements.txt* ./
+RUN pip install --upgrade pip && \
+if [ -f requirements.txt ]; then \
+pip install -r requirements.txt; \
+else \
+pip install flask gunicorn; \
+fi
+
+# Copie de tout le projet
+COPY . .
+
+# Compilation de vérification
+RUN for f in *.py; do \
+if [ -f "$f" ]; then \
+python -m py_compile "$f" || exit 1; \
+fi; \
+done
+
+# Utilisateur non-root (sécurité)
+RUN useradd -m -u 1000 nekyll && \
+chown -R nekyll:nekyll /app
+USER nekyll
+
+# Exposition du port
+EXPOSE 8089
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8089/health')" || exit 1
+
+# Lancement du serveur
+CMD ["gunicorn", "--bind", "0.0.0.0:8089", "--workers", "2", "--threads", "4", "--timeout", "60", "serveur_render:app"]
+# ═══════════════════════════════════════════════════════════════════════
+# NEKYLL — .gitignore
+# ═══════════════════════════════════════════════════════════════════════
+
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Data
+*.db
+*.sqlite
+data/
+sites/*/public/
+
+# Secrets
+.env
+.env.local
+secrets/
+*.pem
+*.key
+
+# Tests
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Temp
+tmp/
+temp/
+*.tmp
+
+# NEKYLL spécifique
+output/
+cache/
+.tier_cache/
+# ═══════════════════════════════════════════════════════════════════════
+# NEKYLL — .gitignore
+# ═══════════════════════════════════════════════════════════════════════
+
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Data
+*.db
+*.sqlite
+data/
+sites/*/public/
+
+# Secrets
+.env
+.env.local
+secrets/
+*.pem
+*.key
+
+# Tests
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Temp
+tmp/
+temp/
+*.tmp
+
+# NEKYLL spécifique
+output/
+cache/
+.tier_cache/
+
+<div align="center">
+
+# 🧬 NEKYLL
+
+**Le générateur de sites statiques avec 10 outils intégrés.**
+
+[![NEKYLL CI](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions/workflows/nekyll-ci.yml/badge.svg)](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions)
+[![Docker](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions/workflows/nekyll-docker.yml/badge.svg)](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+
+*Forgé par **CreWos Sybot** · Fondé par **Aïssa Mohammedi***
+
+</div>
+
+---
+
+## 🎯 C'est quoi NEKYLL ?
+
+**NEKYLL** est un générateur de sites statiques **open source**, écrit en **Python pur**, avec **10 outils intégrés** — tout ce dont un développeur a besoin pour créer, analyser, sécuriser et déployer des sites.
+
+**Pas de dépendance lourde. Pas de Node.js. Pas de build compliqué.**
+
+Juste **Python** et **10 outils** qui font le travail.
+
+---
+
+## 🔥 Les 10 outils intégrés
+
+| # | Module | Fonction |
+|---|--------|----------|
+| **1** | 🌐 **Network Scanner** | Port scan, DNS, ping, HTTP status, LAN |
+| **2** | 🔍 **Analysis HTML** | Fetch, extract, colors, fonts, framework |
+| **3** | 🏗️ **Forge Site** | Génère un site depuis une URL ou une config |
+| **4** | 📻 **Radio** | Streams, métadonnées, now playing |
+| **5** | 📧 **Email** | Mailto, composition, envoi |
+| **6** | 🕵️ **Tor / Anon** | SOCKS5, rotation, obfuscation |
+| **7** | ⚡ **Benchmark** | wrk-style, load test, latency |
+| **8** | 💾 **USB Transfer** | Détection clé, transfert, vérification hash |
+| **9** | 📚 **README / Docs** | Générateur de doc projet |
+| **10** | 🚀 **Launcher** | Ouvre tous les ports, interface unifiée |
+
+---
+
+## 🚀 Installation en 30 secondes
+
+```bash
+# 1. Clone
+git clone https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-.git
+cd nekyll-is-a-static-site-generator-with-built-in-
+
+# 2. Crée un venv
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Installe
+pip install -r requirements.txt
+
+# 4. Lance
+python3 app.py
+
+
+
+
+ 
+<div align="center">
+
+# 🧬 NEKYLL
+
+**Le générateur de sites statiques avec 10 outils intégrés.**
+
+[![NEKYLL CI](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions/workflows/nekyll-ci.yml/badge.svg)](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions)
+[![Docker](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions/workflows/nekyll-docker.yml/badge.svg)](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+
+*Forgé par **CreWos Sybot** · Fondé par **Aïssa Mohammedi***
+
+</div>
+
+---
+
+## 🎯 C'est quoi NEKYLL ?
+
+**NEKYLL** est un générateur de sites statiques **open source**, écrit en **Python pur**, avec **10 outils intégrés** — tout ce dont un développeur a besoin pour créer, analyser, sécuriser et déployer des sites.
+
+**Pas de dépendance lourde. Pas de Node.js. Pas de build compliqué.**
+
+Juste **Python** et **10 outils** qui font le travail.
+
+---
+
+## 🔥 Les 10 outils intégrés
+
+| # | Module | Fonction |
+|---|--------|----------|
+| **1** | 🌐 **Network Scanner** | Port scan, DNS, ping, HTTP status, LAN |
+| **2** | 🔍 **Analysis HTML** | Fetch, extract, colors, fonts, framework |
+| **3** | 🏗️ **Forge Site** | Génère un site depuis une URL ou une config |
+| **4** | 📻 **Radio** | Streams, métadonnées, now playing |
+| **5** | 📧 **Email** | Mailto, composition, envoi |
+| **6** | 🕵️ **Tor / Anon** | SOCKS5, rotation, obfuscation |
+| **7** | ⚡ **Benchmark** | wrk-style, load test, latency |
+| **8** | 💾 **USB Transfer** | Détection clé, transfert, vérification hash |
+| **9** | 📚 **README / Docs** | Générateur de doc projet |
+| **10** | 🚀 **Launcher** | Ouvre tous les ports, interface unifiée |
+
+---
+
+## 🚀 Installation en 30 secondes
+
+```bash
+# 1. Clone
+git clone https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-.git
+cd nekyll-is-a-static-site-generator-with-built-in-
+
+# 2. Crée un venv
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Installe
+pip install -r requirements.txt
+
+# 4. Lance
+python3 app.py
