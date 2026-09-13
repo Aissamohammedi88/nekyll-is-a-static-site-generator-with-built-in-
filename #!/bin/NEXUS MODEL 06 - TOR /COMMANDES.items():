@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+NEXUS MODEL 08 - CODEMORT
+Chemin: ~/Documents/nexus_autonome/modele_08.py
+Port: AUCUN (CLI uniquement)
+Détecte le code mort, les imports inutiles, mesure la complexité,
+analyse l'entropie du code, calcule le score de maintenabilité.
+"""
+
+import sys, os, re, json, math, hashlib, ast, time
+from pathlib import Path
+from datetime import datetime
+from collections import defaultdict, Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+BASE = Path.home() / "Documents" / "nexus_autonome"
+REPORTS = BASE / "codemort"
+REPORTS.mkdir(parents=True, exist_ok=True)
+
+EXTENSIONS = {
+".py": "python", ".js": "javascript", ".ts": "typescript",
+".java": "java", ".rb": "ruby", ".go": "go", ".rs": "rust",
+".c": "c", ".cpp": "cpp", ".h": "c-header", ".hpp": "cpp-header",
+".cs": "csharp", ".php": "php", ".lua": "lua", ".sh": "bash",
+".hs": "haskell", ".erl": "erlang", ".rkt": "racket", ".scala": "scala",
+".kt": "kotlin", ".swift": "swift",
+}
+
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'; B = '\033[94m'; C = '\033[96m'; M = '\033[95m'; N = '\033[0m'
+def ok(m): print(f"{V}[OK]{N} {m}")
+def no(m): print(f"{R}[KO]{N} {m}")
+def warn(m): print(f"{J}[!!]{N} {m}")
+def info(m): print(f"{B}[i]{N} {m}")
+def sect(m): print(f"\n{C}{'='*64}{N}\n{C} {m}{N}\n{C}{'='*64}{N}\n")
+
+
+# ===== SCAN DE DOSSIER =====
+def scanner_dossier(chemin):
+exclusions = {".git", "node_modules", "__pycache__", ".venv", "venv",
+"dist", "build", ".idea", ".vscode", "target", "vendor"}
+fichiers = []
+for root, dirs, files in os.walk(chemin):
+dirs[:] = [d for d in dirs if d not in exclusions]
+for f in files:
+if f.startswith('.'):
+continue
+ext = Path(f).suffix.lower()
+if ext in EXTENSIONS:
+p = Path(root) / f
+try:
+contenu = p.read_text(encoding="utf-8", errors="ignore")
+fichiers.append({
+"chemin": str(p.relative_to(chemin)),
+"nom": f,
+"ext": ext,
+"langage": EXTENSIONS[ext],
+"contenu": contenu,
+"lignes": contenu.count("\n") + 1,
+"octets": p.stat().st_size,
+})
+except Exception as e:
+pass
+return fichiers
+
+
+# ===== MÉTRIQUES DE COMPLEXITÉ =====
+def complexite_cyclomatique(code, langage):
+"""Complexité cyclomatique de McCabe."""
+compteurs = {
+"python": [r"\bif\b", r"\belif\b", r"\bfor\b", r"\bwhile\b", r"\bexcept\b", r"\band\b", r"\bor\b", r"\bcase\b"],
+"javascript": [r"\bif\b", r"\belse if\b", r"\bfor\b", r"\bwhile\b", r"\bcase\b", r"&&", r"\|\|", r"\?.*:"],
+"typescript": [r"\bif\b", r"\belse if\b", r"\bfor\b", r"\bwhile\b", r"\bcase\b", r"&&", r"\|\|"],
+"java": [r"\bif\b", r"\belse if\b", r"\bfor\b", r"\bwhile\b", r"\bcase\b", r"&&", r"\|\|"],
+"go": [r"\bif\b", r"\bfor\b", r"\bcase\b", r"&&", r"\|\|"],
+"rust": [r"\bif\b", r"\bmatch\b", r"\bfor\b", r"\bwhile\b", r"&&", r"\|\|"],
+"c": [r"\bif\b", r"\belse if\b", r"\bfor\b", r"\bwhile\b", r"\bcase\b", r"&&", r"\|\|"],
+"cpp": [r"\bif\b", r"\belse if\b", r"\bfor\b", r"\bwhile\b", r"\bcase\b", r"&&", r"\|\|"],
+}
+patterns = compteurs.get(langage, [r"\bif\b", r"\bfor\b", r"\bwhile\b"])
+count = 1
+for p in patterns:
+count += len(re.findall(p, code))
+return count
+
+
+def halstead_metrics(code):
+"""Métriques de Halstead (vocabulaire, longueur, volume)."""
+operateurs = re.findall(r'[+\-*/%<>=!&|^~?:]', code)
+operandes = re.findall(r'\b\w+\b', code)
+n1 = len(set(operateurs))
+n2 = len(set(operandes))
+N1 = len(operateurs)
+N2 = len(operandes)
+n = n1 + n2
+N = N1 + N2
+volume = N * math.log2(n) if n > 0 else 0
+return {
+"n1": n1, "n2": n2, "N1": N1, "N2": N2,
+"vocabulaire": n, "longueur": N,
+"volume": round(volume, 2),
+}
+
+
+def lignes_de_code(code):
+"""Compte les lignes : total, code, commentaires, vides."""
+lignes = code.split("\n")
+total = len(lignes)
+vides = sum(1 for l in lignes if not l.strip())
+commentaires = 0
+in_block_comment = False
+for l in lignes:
+s = l.strip()
+if '"""' in s or "'''" in s:
+commentaires += 1
+continue
+if s.startswith("#") or s.startswith("//") or s.startswith("*"):
+commentaires += 1
+code_lignes = total - vides - commentaires
+ratio = (commentaires / total * 100) if total > 0 else 0
+return {
+"total": total, "vides": vides,
+"commentaires": commentaires, "code": code_lignes,
+"ratio_commentaires": round(ratio, 2),
+}
+
+
+def index_maintenabilite(volume, complexite, lignes, commentaires_pct):
+"""Indice de maintenabilité (0-100, plus haut = mieux)."""
+if lignes == 0:
+return 100
+try:
+mi = 171 - 5.2 * math.log(volume + 1) - 0.23 * complexite - 16.2 * math.log(lignes + 1) + 50 * math.sin(math.sqrt(2.4 * commentaires_pct / 100))
+return round(max(0, min(100, mi * 100 / 171)), 2)
+except (ValueError, ZeroDivisionError):
+return 0
+
+
+# ===== DÉTECTION CODE MORT =====
+def detecter_code_mort(fichiers):
+"""Détecte fonctions non appelées, imports inutilisés."""
+resultats = []
+
+for f in fichiers:
+if f["langage"] != "python":
+continue
+code = f["contenu"]
+try:
+tree = ast.parse(code)
+except SyntaxError:
+continue
+
+# Fonctions définies
+fonctions = [n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+classes = [n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+imports = []
+for n in ast.walk(tree):
+if isinstance(n, ast.Import):
+for a in n.names:
+imports.append(a.asname or a.name)
+elif isinstance(n, ast.ImportFrom):
+for a in n.names:
+imports.append(a.asname or a.name)
+
+# Compte les usages
+usages = Counter()
+for n in ast.walk(tree):
+if isinstance(n, ast.Name):
+usages[n.id] += 1
+elif isinstance(n, ast.Attribute):
+usages[n.attr] += 1
+
+# Imports non utilisés
+imports_inutiles = [i for i in imports if usages.get(i, 0) <= 1]
+
+# Fonctions jamais appelées
+fonctions_mortes = []
+for fn in fonctions:
+if fn.startswith("_") or fn in ("main", "__init__"):
+continue
+if usages.get(fn, 0) == 0:
+fonctions_mortes.append(fn)
+
+if imports_inutiles or fonctions_mortes:
+resultats.append({
+"fichier": f["chemin"],
+"imports_inutiles": imports_inutiles,
+"fonctions_mortes": fonctions_mortes,
+})
+
+return resultats
+
+
+# ===== ANALYSE =====
+def analyser_fichier(f):
+code = f["contenu"]
+lignes = lignes_de_code(code)
+complexite = complexite_cyclomatique(code, f["langage"])
+halstead = halstead_metrics(code)
+mi = index_maintenabilite(halstead["volume"], complexite, lignes["code"], lignes["ratio_commentaires"])
+return {
+"chemin": f["chemin"],
+"nom": f["nom"],
+"langage": f["langage"],
+"lignes": lignes,
+"complexite": complexite,
+"halstead": halstead,
+"maintenabilite": mi,
+}
+
+
+def analyser_dossier(chemin):
+fichiers = scanner_dossier(chemin)
+if not fichiers:
+warn("Aucun fichier détecté"); return None
+
+analyses = []
+with ThreadPoolExecutor(max_workers=8) as ex:
+futures = [ex.submit(analyser_fichier, f) for f in fichiers]
+for fu in as_completed(futures):
+analyses.append(fu.result())
+
+# Global
+total_lignes = sum(a["lignes"]["total"] for a in analyses)
+total_code = sum(a["lignes"]["code"] for a in analyses)
+total_commentaires = sum(a["lignes"]["commentaires"] for a in analyses)
+complexite_totale = sum(a["complexite"] for a in analyses)
+mi_moyen = sum(a["maintenabilite"] for a in analyses) / len(analyses) if analyses else 0
+
+langages = Counter(a["langage"] for a in analyses)
+
+return {
+"chemin": str(chemin),
+"date": datetime.now().isoformat(),
+"total_fichiers": len(analyses),
+"langages": dict(langages),
+"total_lignes": total_lignes,
+"total_code": total_code,
+"total_commentaires": total_commentaires,
+"complexite_totale": complexite_totale,
+"maintenabilite_moyenne": round(mi_moyen, 2),
+"fichiers": analyses,
+}
+
+
+# ===== COMMANDES =====
+def cmd_scan(chemin):
+sect(f"SCAN: {chemin}")
+r = analyser_dossier(chemin)
+if not r: return
+ok(f"{r['total_fichiers']} fichiers")
+info(f"Langages : {r['langages']}")
+info(f"Lignes totales : {r['total_lignes']:,}")
+info(f"Lignes de code : {r['total_code']:,}")
+info(f"Complexité totale : {r['complexite_totale']}")
+info(f"Maintenabilité moyenne : {r['maintenabilite_moyenne']}/100")
+
+def cmd_mort(chemin):
+sect(f"CODE MORT: {chemin}")
+fichiers = scanner_dossier(chemin)
+resultats = detecter_code_mort(fichiers)
+if not resultats:
+ok("Aucun code mort détecté")
+return
+no(f"{len(resultats)} fichier(s) avec du code mort")
+for r in resultats:
+print(f"\n {r['fichier']}")
+if r["imports_inutiles"]:
+warn(f" Imports inutiles: {', '.join(r['imports_inutiles'])}")
+if r["fonctions_mortes"]:
+warn(f" Fonctions mortes: {', '.join(r['fonctions_mortes'])}")
+
+def cmd_top(chemin, n=20):
+sect(f"TOP {n} FICHIERS PAR COMPLEXITÉ: {chemin}")
+r = analyser_dossier(chemin)
+if not r: return
+fichiers = sorted(r["fichiers"], key=lambda x: -x["complexite"])[:n]
+for f in fichiers:
+print(f" {str(f['complexite']).ljust(5)} {f['chemin'][:70]}")
+
+def cmd_lignes(chemin):
+sect(f"LIGNES DE CODE: {chemin}")
+r = analyser_dossier(chemin)
+if not r: return
+fichiers = sorted(r["fichiers"], key=lambda x: -x["lignes"]["code"])[:30]
+for f in fichiers:
+l = f["lignes"]
+print(f" {str(l['code']).ljust(6)} code / {str(l['total']).ljust(6)} total / {str(l['commentaires']).ljust(5)} com. {f['chemin'][:50]}")
+
+def cmd_json(chemin):
+r = analyser_dossier(chemin)
+if r: print(json.dumps(r, indent=2, ensure_ascii=False)[:15000])
+
+def cmd_export(chemin):
+r = analyser_dossier(chemin)
+if not r: return
+ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+nom = Path(chemin).name
+f = REPORTS / f"codemort_{nom}_{ts}.json"
+f.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+ok(f"Exporté: {f}")
+
+def cmd_score(chemin):
+sect(f"SCORE: {chemin}")
+r = analyser_dossier(chemin)
+if not r: return
+score = r["maintenabilite_moyenne"]
+if score >= 85:
+ok(f"Score: {score}/100 — Excellent")
+elif score >= 65:
+ok(f"Score: {score}/100 — Bon")
+elif score >= 40:
+warn(f"Score: {score}/100 — Moyen")
+else:
+no(f"Score: {score}/100 — À refactorer")
+
+
+COMMANDES = {
+"scan": (cmd_scan, "scan <dossier> - Scan complet"),
+"mort": (cmd_mort, "mort <dossier> - Détecte le code mort"),
+"top": (cmd_top, "top <dossier> [n]- Top fichiers par complexité"),
+"lignes": (cmd_lignes, "lignes <dossier> - Compte les lignes"),
+"json": (cmd_json, "json <dossier> - Export JSON complet"),
+"export": (cmd_export, "export <dossier> - Export JSON fichier"),
+"score": (cmd_score, "score <dossier> - Score maintenabilité"),
+}
+
+
+def usage():
+print(f"""
+{C}NEXUS MODEL 08 - CODEMORT{N}
+Chemin: {BASE}/modele_08.py
+Port: AUCUN (CLI)
+
+Usage: python3 modele_08.py <commande> <dossier> [args]
+
+Commandes:
+""")
+for nom, (_, desc) in COMMANDES.items():
+print(f" {nom.ljust(10)} {desc}")
+print(f"""
+Exemples:
+python3 modele_08.py scan ~/Documents/nexus_autonome
+python3 modele_08.py mort ~/Documents/nexus_autonome
+python3 modele_08.py top ~/Documents/nexus_autonome 30
+python3 modele_08.py score ~/Documents/nexus_autonome
+python3 modele_08.py export ~/Documents/nexus_autonome
+""")
+
+
+def main():
+if len(sys.argv) < 2:
+usage(); return
+cmd = sys.argv[1]
+args = sys.argv[2:]
+if cmd not in COMMANDES:
+no(f"Commande inconnue: {cmd}")
+usage(); return
+fn, _ = COMMANDES[cmd]
+if not args:
+no("Dossier manquant"); return
+sect(f"{cmd} {args[0][:70]}")
+try:
+if cmd == "top":
+n = int(args[1]) if len(args) > 1 else 20
+fn(args[0], n)
+else:
+fn(args[0])
+except Exception as e:
+no(f"Erreur: {e}")
+
+
+if __name__ == "__main__":
+main()
