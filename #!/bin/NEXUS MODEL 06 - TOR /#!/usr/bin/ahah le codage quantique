@@ -1,0 +1,124 @@
+
+================================================================
+
+USAGE
+
+================================================================
+
+def usage():
+print(f"""
+{C}NEXUS MODEL 09 - STATIC FORGE (mieux que Jekyll){N}
+Chemin: {BASE}/modele_09.py
+Port: AUCUN (CLI) — port ouvert à l'étape 10 seulement
+
+Usage: python3 modele_09.py <commande> [args]
+
+Commandes:
+new <site> - Crée un nouveau site
+build <site> - Génère HTML/CSS/JS
+preview <site> [port] - Build + serveur local
+compete - Score vs Google/Jekyll/Hugo
+langs - Liste les 20 langages
+
+Exemples:
+python3 modele_09.py new "Mon Portfolio"
+python3 modele_09.py build "Mon Portfolio"
+python3 modele_09.py preview "Mon Portfolio" 9009
+python3 modele_09.py compete
+python3 modele_09.py langs
+""")
+
+def main():
+if len(sys.argv) < 2:
+usage(); return
+cmd = sys.argv[1]
+args = sys.argv[2:]
+try:
+if cmd == "new":
+cmd_new(args[0] if args else "nexus-site")
+elif cmd == "build":
+cmd_build(args[0] if args else "nexus-site")
+elif cmd == "preview":
+nom = args[0] if args else "nexus-site"
+port = int(args[1]) if len(args) > 1 else PORT_DEFAULT
+cmd_preview(nom, port)
+elif cmd == "compete":
+cmd_compete()
+elif cmd == "langs":
+cmd_langs()
+else:
+usage()
+except Exception as e:
+no(f"Erreur : {e}")
+import traceback
+traceback.print_exc()
+
+if name == "main":
+try:
+main()
+except KeyboardInterrupt:
+print("\n👋 Interrompu")
+
+```
+
+---
+
+## 🧪 TESTS
+
+```bash
+# 1. Vérifier que ça compile
+python3 -m py_compile ~/Documents/nexus_autonome/modele_09.py
+
+# 2. Créer un site
+python3 ~/Documents/nexus_autonome/modele_09.py new "Nexus Demo"
+
+# 3. Le construire
+python3 ~/Documents/nexus_autonome/modele_09.py build "Nexus Demo"
+
+# 4. Voir les 20 langages
+python3 ~/Documents/nexus_autonome/modele_09.py langs
+
+# 5. Score vs Google
+python3 ~/Documents/nexus_autonome/modele_09.py compete
+
+# 6. Preview (port 9009 — ouverture seulement à l'étape 10)
+python3 ~/Documents/nexus_autonome/modele_09.py preview "Nexus Demo" 9009
+```
+
+---
+
+📖 EXEMPLES
+
+Lance compete :
+
+```
+SCORE NEXUS
+Génération statique 8 ████████
+Markdown natif 6 ██████
+Coloration syntaxique 7 ███████
+Zéro dépendance 9 █████████
+Python pur 5 █████
+20 langages dont Obj-C/Perl 8 ████████
+Multimodal (texte+code+image) 6 ██████
+Compression + cache 4 ████
+Parallélisation 5 █████
+Compatible a-Shell iOS 4 ████
+Deep linking intégré 3 ███
+Quantum engine 5 █████
+Total : 70/100
+
+COMPARAISON
+NEXUS Static Forge 70/100 ███████████████████████ ⬅️ NEXUS
+Hugo 78/100 ██████████████████████████
+Netlify 70/100 ███████████████████████
+Jekyll (GitHub) 62/100 ████████████████████
+Google Sites 45/100 ███████████████
+```
+
+---
+
+⚠️ si vous rencontrer un probleme avec le port changer le ou skill tuer les encien proceseur merci et bien tot
+
+Risque Protection
+Port 9009 occupé Affiche erreur claire, change de port
+Fichiers écrasés Crée dans sites/<nom>/, jamais ailleurs
