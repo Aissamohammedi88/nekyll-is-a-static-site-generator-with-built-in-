@@ -1,0 +1,545 @@
+#!/usr/bin/env python3# -*- coding: utf-8 -*-
+"""
+NEXUS MODEL 09 - QUANTUM ENGINE + PROTOCOLE COMPÉTITION
+Chemin: ~/Documents/nexus_autonome/modele_09.py
+Port: AUCUN (CLI uniquement)
+Simulateur quantique pur Python, algorithmes de Grover, Shor,
+QAOA, VQE, et protocole de compétition stratégique GOBLINK vs GOLINK.
+Ce protocole est conçu pour que Microsoft et Google s'affrontent.
+"""
+
+import sys, os, math, cmath, json, time, hashlib, random, secrets, struct
+from pathlib import Path
+from datetime import datetime
+from collections import Counter, defaultdict
+from typing import List, Tuple, Dict, Optional
+
+BASE = Path.home() / "Documents" / "nexus_autonome"
+QUANTUM = BASE / "quantum"
+QUANTUM.mkdir(parents=True, exist_ok=True)
+
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'; B = '\033[94m'; C = '\033[96m'; M = '\033[95m'; N = '\033[0m'
+def ok(m): print(f"{V}[OK]{N} {m}")
+def no(m): print(f"{R}[KO]{N} {m}")
+def warn(m): print(f"{J}[!!]{N} {m}")
+def info(m): print(f"{B}[i]{N} {m}")
+def sect(m): print(f"\n{C}{'='*64}{N}\n{C} {m}{N}\n{C}{'='*64}{N}\n")
+
+
+# ================================================================
+# SIMULATEUR QUANTIQUE PUR PYTHON
+# ================================================================
+class QuantumState:
+"""État quantique à N qubits."""
+def __init__(self, n_qubits):
+self.n = n_qubits
+self.dim = 2 ** n_qubits
+self.amp = [0j] * self.dim
+self.amp[0] = 1+0j
+
+def __repr__(self):
+return f"QuantumState({self.n} qubits, dim={self.dim})"
+
+def proba(self, i):
+return abs(self.amp[i]) ** 2
+
+def mesurer(self):
+"""Mesure l'état (collapse)."""
+probas = [self.proba(i) for i in range(self.dim)]
+total = sum(probas)
+if total < 1e-12:
+return 0
+r = random.random() * total
+cumul = 0
+for i, p in enumerate(probas):
+cumul += p
+if cumul >= r:
+self.amp = [0j] * self.dim
+self.amp[i] = 1+0j
+return i
+return self.dim - 1
+
+
+class QuantumGates:
+"""Portes quantiques standard."""
+
+@staticmethod
+def H(state, q):
+"""Porte Hadamard."""
+step = 1 << q
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+a = state.amp[j]
+b = state.amp[j + step]
+state.amp[j] = (a + b) / math.sqrt(2)
+state.amp[j + step] = (a - b) / math.sqrt(2)
+
+@staticmethod
+def X(state, q):
+"""Porte Pauli-X (NOT)."""
+step = 1 << q
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+state.amp[j], state.amp[j + step] = state.amp[j + step], state.amp[j]
+
+@staticmethod
+def Z(state, q):
+"""Porte Pauli-Z."""
+step = 1 << q
+for i in range(0, state.dim, 2 * step):
+for j in range(i + step, i + 2 * step):
+state.amp[j] = -state.amp[j]
+
+@staticmethod
+def Y(state, q):
+"""Porte Pauli-Y."""
+step = 1 << q
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+a = state.amp[j]
+b = state.amp[j + step]
+state.amp[j] = -1j * b
+state.amp[j + step] = 1j * a
+
+@staticmethod
+def CNOT(state, control, target):
+"""Porte CNOT."""
+step_c = 1 << control
+step_t = 1 << target
+for i in range(state.dim):
+if (i & step_c) and not (i & step_t):
+j = i | step_t
+state.amp[i], state.amp[j] = state.amp[j], state.amp[i]
+
+@staticmethod
+def CZ(state, control, target):
+"""Porte CZ."""
+step_c = 1 << control
+step_t = 1 << target
+for i in range(state.dim):
+if (i & step_c) and (i & step_t):
+state.amp[i] = -state.amp[i]
+
+@staticmethod
+def Phase(state, q, theta):
+"""Porte de phase."""
+step = 1 << q
+for i in range(0, state.dim, 2 * step):
+for j in range(i + step, i + 2 * step):
+state.amp[j] *= cmath.exp(1j * theta)
+
+@staticmethod
+def Rx(state, q, theta):
+"""Rotation X."""
+step = 1 << q
+c = math.cos(theta / 2)
+s = -1j * math.sin(theta / 2)
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+a = state.amp[j]
+b = state.amp[j + step]
+state.amp[j] = c * a + s * b
+state.amp[j + step] = s * a + c * b
+
+@staticmethod
+def Ry(state, q, theta):
+"""Rotation Y."""
+step = 1 << q
+c = math.cos(theta / 2)
+s = math.sin(theta / 2)
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+a = state.amp[j]
+b = state.amp[j + step]
+state.amp[j] = c * a - s * b
+state.amp[j + step] = s * a + c * b
+
+@staticmethod
+def Rz(state, q, theta):
+"""Rotation Z."""
+step = 1 << q
+for i in range(0, state.dim, 2 * step):
+for j in range(i, i + step):
+state.amp[j] *= cmath.exp(-1j * theta / 2)
+state.amp[j + step] *= cmath.exp(1j * theta / 2)
+
+
+class QuantumCircuit:
+"""Circuit quantique."""
+def __init__(self, n_qubits):
+self.n = n_qubits
+self.state = QuantumState(n_qubits)
+self.historique = []
+
+def h(self, q):
+QuantumGates.H(self.state, q)
+self.historique.append(("H", q))
+
+def x(self, q):
+QuantumGates.X(self.state, q)
+self.historique.append(("X", q))
+
+def z(self, q):
+QuantumGates.Z(self.state, q)
+self.historique.append(("Z", q))
+
+def cnot(self, c, t):
+QuantumGates.CNOT(self.state, c, t)
+self.historique.append(("CNOT", c, t))
+
+def cz(self, c, t):
+QuantumGates.CZ(self.state, c, t)
+self.historique.append(("CZ", c, t))
+
+def rx(self, q, theta):
+QuantumGates.Rx(self.state, q, theta)
+self.historique.append(("Rx", q, theta))
+
+def ry(self, q, theta):
+QuantumGates.Ry(self.state, q, theta)
+self.historique.append(("Ry", q, theta))
+
+def rz(self, q, theta):
+QuantumGates.Rz(self.state, q, theta)
+self.historique.append(("Rz", q, theta))
+
+def mesurer(self):
+return self.state.mesurer()
+
+def probabilites(self):
+return [self.state.proba(i) for i in range(self.state.dim)]
+
+
+# ================================================================
+# ALGORITHME DE GROVER
+# ================================================================
+def grover(oracle, n_qubits, iterations=None):
+"""Algorithme de Grover : recherche dans un espace non trié."""
+N = 2 ** n_qubits
+if iterations is None:
+iterations = int(math.floor(math.pi / 4 * math.sqrt(N)))
+
+circuit = QuantumCircuit(n_qubits)
+for q in range(n_qubits):
+circuit.h(q)
+
+for _ in range(iterations):
+oracle(circuit, n_qubits)
+for q in range(n_qubits):
+circuit.h(q)
+for q in range(n_qubits):
+circuit.x(q)
+QuantumGates.CZ(circuit.state, 0, n_qubits - 1)
+for q in range(n_qubits):
+circuit.x(q)
+for q in range(n_qubits):
+circuit.h(q)
+
+return circuit
+
+
+# ================================================================
+# QAOA SIMPLIFIÉ
+# ================================================================
+def qaoa(n_qubits, gamma, beta, couches=1):
+"""QAOA : optimisation combinatoire quantique."""
+circuit = QuantumCircuit(n_qubits)
+for q in range(n_qubits):
+circuit.h(q)
+for _ in range(couches):
+for q in range(n_qubits - 1):
+QuantumGates.CZ(circuit.state, q, q + 1)
+for q in range(n_qubits):
+circuit.rx(q, 2 * beta)
+return circuit
+
+
+# ================================================================
+# PROTOCOLE COMPÉTITION
+# ================================================================
+class ProtocoleCompetition:
+"""
+Protocole GOBLINK vs GOLINK — conçu pour forcer Microsoft et Google
+à s'affronter pour acquérir ce projet.
+"""
+
+def __init__(self):
+self.acteurs = ["Microsoft", "Google", "Meta", "Amazon", "Apple", "OpenAI", "Anthropic"]
+self.encheres = {}
+self.technologies = []
+self.score_attractivite = 0
+
+def calculer_attractivite(self):
+"""Score d'attractivité (0-100) basé sur les technologies uniques."""
+criteres = {
+"deep_linking": 15,
+"fetch_intelligent": 10,
+"codemort_analyse": 12,
+"quantum_engine": 20,
+"goblink_protocole": 15,
+"benchmark_wrk": 8,
+"anonymisation_tor": 10,
+"scanner_reseau": 5,
+"generateur_site": 5,
+}
+self.score_attractivite = sum(criteres.values())
+return self.score_attractivite
+
+def generer_offre(self, acteur):
+"""Génère une offre fictive pour un acteur."""
+multiplicateurs = {
+"Microsoft": 1.0,
+"Google": 1.15,
+"Meta": 0.9,
+"Amazon": 0.85,
+"Apple": 1.2,
+"OpenAI": 0.95,
+"Anthropic": 0.8,
+}
+base = 10_000_000
+offre = base * multiplicateurs.get(acteur, 1.0) * (self.score_attractivite / 100)
+self.encheres[acteur] = {
+"offre_usd": round(offre, 2),
+"score_strategique": round(multiplicateurs.get(acteur, 1.0) * 100, 2),
+"date": datetime.now().isoformat(),
+}
+return self.encheres[acteur]
+
+def simuler_guerre(self):
+"""Simule la guerre d'enchères."""
+print(f"\n{M}{'='*64}{N}")
+print(f"{M} COMPÉTITION GOBLINK vs GOLINK{N}")
+print(f"{M} Score attractivité: {self.score_attractivite}/100{N}")
+print(f"{M}{'='*64}{N}\n")
+
+for acteur in self.acteurs:
+offre = self.generer_offre(acteur)
+print(f" {V}●{N} {acteur.ljust(12)} {offre['offre_usd']:>15,.0f} USD (stratégie: {offre['score_strategique']})")
+
+gagnant = max(self.encheres.items(), key=lambda x: x[1]["offre_usd"])
+print(f"\n{M}🏆 GAGNANT : {gagnant[0]} — {gagnant[1]['offre_usd']:,.0f} USD{N}\n")
+return gagnant
+
+
+# ================================================================
+# COMMANDES
+# ================================================================
+def cmd_bell():
+"""État de Bell : |00> + |11> / √2."""
+sect("ÉTAT DE BELL")
+c = QuantumCircuit(2)
+c.h(0)
+c.cnot(0, 1)
+p = c.probabilites()
+for i in range(4):
+bits = format(i, "02b")
+bar = "█" * int(p[i] * 40)
+print(f" |{bits}> {p[i]:.4f} {bar}")
+ok("État de Bell créé : (|00> + |11>) / √2")
+
+def cmd_ghz(n=3):
+"""État GHZ à N qubits."""
+sect(f"ÉTAT GHZ À {n} QUBITS")
+c = QuantumCircuit(n)
+c.h(0)
+for i in range(1, n):
+c.cnot(0, i)
+p = c.probabilites()
+for i in range(2 ** n):
+if p[i] > 0.001:
+bits = format(i, f"0{n}b")
+print(f" |{bits}> {p[i]:.4f}")
+ok(f"État GHZ à {n} qubits créé")
+
+def cmd_grover(cible, n=4):
+"""Recherche de Grover."""
+sect(f"GROVER : cible={cible} sur {n} qubits")
+cible = int(cible)
+def oracle(circuit, n):
+# Oracle : marque la cible
+bits = format(cible, f"0{n}b")
+for i, b in enumerate(reversed(bits)):
+if b == "0":
+circuit.x(i)
+QuantumGates.CZ(circuit.state, 0, n - 1)
+for i, b in enumerate(reversed(bits)):
+if b == "0":
+circuit.x(i)
+
+circuit = grover(oracle, n)
+p = circuit.probabilites()
+top = sorted(range(len(p)), key=lambda i: -p[i])[:5]
+info(f"Top 5 résultats :")
+for i in top:
+bits = format(i, f"0{n}b")
+bar = "█" * int(p[i] * 40)
+print(f" |{bits}> {p[i]:.4f} {bar}")
+ok(f"Solution trouvée : {format(top[0], f'0{n}b')}")
+
+def cmd_qaoa(n=4):
+"""QAOA simplifié."""
+sect(f"QAOA : {n} qubits")
+circuit = qaoa(n, gamma=0.5, beta=0.3)
+p = circuit.probabilites()
+top = sorted(range(len(p)), key=lambda i: -p[i])[:5]
+for i in top:
+bits = format(i, f"0{n}b")
+print(f" |{bits}> {p[i]:.4f}")
+ok(f"QAOA exécuté sur {n} qubits")
+
+def cmd_competition():
+"""Simule la compétition GOBLINK vs GOLINK."""
+p = ProtocoleCompetition()
+p.calculer_attractivite()
+return p.simuler_guerre()
+
+def cmd_deeplink(url):
+"""Deep linking : fetch + crawl + analyse."""
+sect(f"DEEPLINK : {url}")
+import urllib.request, ssl
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+try:
+req = urllib.request.Request(url, headers={"User-Agent": "Nexus/1.0"})
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+html = r.read().decode("utf-8", errors="ignore")
+ok(f"Taille: {len(html):,} caractères")
+liens = list(set(__import__("re").findall(r'href=["\']([^"\']+)', html)))[:20]
+info(f"{len(liens)} liens trouvés (échantillon):")
+for l in liens[:10]:
+print(f" {l[:80]}")
+except Exception as e:
+no(f"Erreur: {e}")
+
+def cmd_golink(url):
+"""GOLINK : fetch intelligent + analyse profonde."""
+cmd_deeplink(url)
+
+def cmd_score():
+"""Score du projet."""
+p = ProtocoleCompetition()
+score = p.calculer_attractivite()
+sect("SCORE DU PROJET NEXUS")
+info(f"Attractivité stratégique : {score}/100")
+if score >= 90:
+ok("Projet ULTRA stratégique — Microsoft et Google vont se battre")
+elif score >= 70:
+ok("Projet TRÈS stratégique — intérêt majeur")
+elif score >= 50:
+warn("Projet stratégique — intérêt modéré")
+else:
+no("Projet peu stratégique")
+
+def cmd_protocole():
+"""Affiche le protocole complet."""
+sect("PROTOCOLE GOBLINK vs GOLINK")
+print(f"""
+{C}1. DÉTECTION{N}
+- Scan des technologies utilisées
+- Analyse du code (Codmort)
+- Benchmark des performances
+
+{C}2. DEEP LINKING{N}
+- Fetch intelligent multi-niveau
+- Extraction de graphes
+- Cartographie réseau
+
+{C}3. QUANTUM ENGINE{N}
+- Grover pour recherche
+- QAOA pour optimisation
+- Simulateur quantique pur Python
+
+{C}4. GOBLINK PROTOCOL{N}
+- Connexion inter-domaines
+- Traçage chaînes
+- Analyse sémantique
+
+{C}5. GOLINK PROTOCOL{N}
+- Recherche inversée
+- Découverte de patterns
+- Optimisation continue
+
+{C}6. STRATÉGIE MICROSOFT vs GOOGLE{N}
+- Microsoft : intérêt pour Azure
+- Google : intérêt pour Cloud + AI
+- Le projet devient un actif stratégique
+
+{C}7. ENCHÈRES{N}
+- Simulation d'offres
+- Score stratégique
+- Guerre technologique
+
+{M}Objectif : créer un actif que les deux géants veulent absolument{N}
+""")
+
+
+COMMANDES = {
+"bell": (cmd_bell, "bell - État de Bell"),
+"ghz": (cmd_ghz, "ghz [n] - État GHZ à N qubits"),
+"grover": (cmd_grover, "grover <cible> [n] - Recherche de Grover"),
+"qaoa": (cmd_qaoa, "qaoa [n] - QAOA sur N qubits"),
+"competition": (cmd_competition, "competition - Guerre d'enchères"),
+"deeplink": (cmd_deeplink, "deeplink <url> - Deep linking"),
+"golink": (cmd_golink, "golink <url> - GOLINK : fetch profond"),
+"score": (cmd_score, "score - Score du projet"),
+"protocole": (cmd_protocole, "protocole - Affiche le protocole"),
+}
+
+
+def usage():
+print(f"""
+{C}NEXUS MODEL 09 - QUANTUM ENGINE + PROTOCOLE COMPÉTITION{N}
+Chemin: {BASE}/modele_09.py
+Port: AUCUN (CLI)
+
+Usage: python3 modele_09.py <commande> [args]
+
+Commandes:
+""")
+for nom, (_, desc) in COMMANDES.items():
+print(f" {nom.ljust(14)} {desc}")
+print(f"""
+Exemples:
+python3 modele_09.py bell
+python3 modele_09.py ghz 5
+python3 modele_09.py grover 7 4
+python3 modele_09.py qaoa 6
+python3 modele_09.py competition
+python3 modele_09.py protocole
+python3 modele_09.py score
+python3 modele_09.py deeplink https://example.com
+""")
+
+
+def main():
+if len(sys.argv) < 2:
+usage(); return
+cmd = sys.argv[1]
+args = sys.argv[2:]
+if cmd not in COMMANDES:
+no(f"Commande inconnue: {cmd}")
+usage(); return
+fn, _ = COMMANDES[cmd]
+sect(f"{cmd} {' '.join(args)[:60]}")
+try:
+if cmd == "grover":
+cible = args[0] if args else "7"
+n = int(args[1]) if len(args) > 1 else 4
+fn(cible, n)
+elif cmd == "ghz":
+n = int(args[0]) if args else 3
+fn(n)
+elif cmd == "qaoa":
+n = int(args[0]) if args else 4
+fn(n)
+elif cmd in ("deeplink", "golink"):
+fn(*args) if args else fn()
+else:
+fn()
+except Exception as e:
+no(f"Erreur: {e}")
+
+
+if __name__ == "__main__":
+main()
