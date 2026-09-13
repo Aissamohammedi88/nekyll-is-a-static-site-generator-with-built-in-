@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+NEXUS MODEL 06 - TOR / ANONYMISATION
+Chemin: ~/Documents/nexus_autonome/modele_06.py
+Port: AUCUN (CLI uniquement)
+Client SOCKS5 pur Python, rotation identité, obfuscation, test Tor.
+"""
+
+import sys, os, ssl, re, json, time, socket, random, hashlib, secrets
+import urllib.request, urllib.error
+from pathlib import Path
+from datetime import datetime
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+BASE = Path.home() / "Documents" / "nexus_autonome"
+BASE.mkdir(parents=True, exist_ok=True)
+
+SOCKS_HOST = "127.0.0.1"
+SOCKS_PORT = 9050
+
+USER_AGENTS = [
+"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+"Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+"Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
+"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+]
+
+OBFUSCATION_HEADERS = {
+"Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+"Accept-Encoding": "gzip, deflate, br",
+"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+"DNT": "1",
+"Upgrade-Insecure-Requests": "1",
+"Sec-Fetch-Dest": "document",
+"Sec-Fetch-Mode": "navigate",
+"Sec-Fetch-Site": "none",
+"Sec-Fetch-User": "?1",
+"Cache-Control": "max-age=0",
+}
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'; B = '\033[94m'; C = '\033[96m'; M = '\033[95m'; N = '\033[0m'
+def ok(m): print(f"{V}[OK]{N} {m}")
+def no(m): print(f"{R}[KO]{N} {m}")
+def warn(m): print(f"{J}[!!]{N} {m}")
+def info(m): print(f"{B}[i]{N} {m}")
+def sect(m): print(f"\n{C}{'='*60}{N}\n{C} {m}{N}\n{C}{'='*60}{N}\n")
+
+
+class Socks5:
+@staticmethod
+def connect(socks_host, socks_port, target_host, target_port, timeout=15):
+try:
+s = socket.create_connection((socks_host, socks_port), timeout=timeout)
+s.settimeout(timeout)
+s.sendall(b"\x05\x01\x00")
+rep = s.recv(2)
+if rep != b"\x05\x00":
+s.close(); return None
+host_b = target_host.encode("utf-8")
+req = b"\x05\x01\x00\x03" + bytes([len(host_b)]) + host_b + target_port.to_bytes(2, "big")
+s.sendall(req)
+rep = s.recv(4)
+if rep[1] != 0x00:
+s.close(); return None
+if rep[3] == 0x01:
+s.recv(4)
+elif rep[3] == 0x03:
+l = s.recv(1)[0]
+s.recv(l)
+elif rep[3] == 0x04:
+s.recv(16)
+s.recv(2)
+return s
+except Exception:
+return None
+
+
+class Rotateur:
+def __init__(self):
+self.ua = random.choice(USER_AGENTS)
+self.last_rot = time.time()
+self.count = 0
+self.historique = []
+
+def rotate(self):
+self.ua = random.choice(USER_AGENTS)
+self.last_rot = time.time()
+self.count += 1
+self.historique.append({
+"n": self.count,
+"time": datetime.now().isoformat(),
+"ua": self.ua[:60],
+})
+if len(self.historique) > 50:
+self.historique = self.historique[-50:]
+
+def headers(self):
+h = {"User-Agent": self.ua}
+h.update(OBFUSCATION_HEADERS)
+return h
+
+
+class ClientAnon:
+def __init__(self, use_tor=True):
+self.use_tor = use_tor
+self.rotateur = Rotateur()
+self.stats = {"requetes": 0, "succes": 0, "echecs": 0, "octets": 0}
+
+def check_tor(self):
+try:
+s = socket.create_connection((SOCKS_HOST, SOCKS_PORT), timeout=3)
+s.close()
+return True
+except Exception:
+return False
+
+def _connect(self, host, port, https=False):
+if self.use_tor:
+s = Socks5.connect(SOCKS_HOST, SOCKS_PORT, host, port)
+if s is None:
+return None
+else:
+try:
+s = socket.create_connection((host, port), timeout=15)
+except Exception:
+return None
+if https:
+c = ssl.create_default_context()
+c.check_hostname = False
+c.verify_mode = ssl.CERT_NONE
+try:
+s = c.wrap_socket(s, server_hostname=host)
+except Exception:
+s.close(); return None
+return s
+
+def get(self, url, timeout=20):
+self.stats["requetes"] += 1
+p = urlparse(url)
+host = p.hostname
+port = p.port or (443 if p.scheme == "https" else 80)
+path = p.path or "/"
+if p.query:
+path += "?" + p.query
+
+if not host:
+self.stats["echecs"] += 1
+return {"ok": False, "erreur": "URL invalide"}
+
+s = self._connect(host, port, https=(p.scheme == "https"))
+if s is None:
+self.stats["echecs"] += 1
+return {"ok": False, "erreur": "Connexion échouée (Tor down ?)"}
+
+h = self.rotateur.headers()
+h["Host"] = host
+h["Connection"] = "close"
+
+req = f"GET {path} HTTP/1.1\r\n"
+for k, v in h.items():
+req += f"{k}: {v}\r\n"
+req += "\r\n"
+
+try:
+s.sendall(req.encode())
+data = b""
+while True:
+chunk = s.recv(32768)
+if not chunk:
+break
+data += chunk
+s.close()
+
+self.stats["succes"] += 1
+self.stats["octets"] += len(data)
+
+code = 0
+try:
+code = int(data.split(b"\r\n", 1)[0].split(b" ")[1])
+except Exception:
+pass
+
+return {"ok": True, "code": code, "taille": len(data), "data": data}
+except Exception as e:
+self.stats["echecs"] += 1
+try: s.close()
+except: pass
+return {"ok": False, "erreur": str(e)[:100]}
+
+def get_body(self, url):
+r = self.get(url)
+if not r["ok"]:
+return r
+try:
+body = r["data"].split(b"\r\n\r\n", 1)[1]
+try:
+text = body.decode("utf-8", errors="ignore")
+except Exception:
+text = str(body[:2000])
+return {"ok": True, "code": r["code"], "text": text}
+except Exception as e:
+return {"ok": False, "erreur": str(e)}
+
+
+def cmd_check():
+sect("VERIFICATION TOR")
+try:
+s = socket.create_connection((SOCKS_HOST, SOCKS_PORT), timeout=3)
+s.close()
+ok(f"Tor detecte sur {SOCKS_HOST}:{SOCKS_PORT}")
+except Exception:
+no(f"Tor NON detecte sur {SOCKS_HOST}:{SOCKS_PORT}")
+warn("Sur iOS : lance Orbot")
+warn("Sur macOS : brew install tor && tor")
+return
+
+info("Test de sortie via Tor...")
+client = ClientAnon(use_tor=True)
+r = client.get("http://check.torproject.org/api/ip")
+if r["ok"]:
+try:
+body = r["data"].split(b"\r\n\r\n", 1)[1].decode()
+data = json.loads(body)
+ok(f"IP vue par Tor : {data.get('IP', '?')}")
+ok(f"Est Tor : {data.get('IsTor', '?')}")
+except Exception as e:
+warn(f"Parse: {e}")
+print(r["data"][:300])
+else:
+no(f"Requete echouee : {r['erreur']}")
+
+
+def cmd_ip():
+sect("IP PUBLIQUE VIA TOR")
+client = ClientAnon(use_tor=True)
+r = client.get("https://api.ipify.org?format=json")
+if r["ok"]:
+try:
+body = r["data"].split(b"\r\n\r\n", 1)[1].decode()
+data = json.loads(body)
+ok(f"IP : {data.get('ip', '?')}")
+except Exception:
+print(r["data"][:500])
+else:
+no(r["erreur"])
+
+
+def cmd_test_direct(url="http://example.com"):
+sect(f"TEST DIRECT : {url}")
+client = ClientAnon(use_tor=False)
+r = client.get(url)
+if r["ok"]:
+ok(f"HTTP {r['code']} - {r['taille']} octets")
+else:
+no(r["erreur"])
+
+
+def cmd_test_tor(url="http://example.com"):
+sect(f"TEST TOR : {url}")
+client = ClientAnon(use_tor=True)
+if not client.check_tor():
+no("Tor non disponible")
+return
+r = client.get(url)
+if r["ok"]:
+ok(f"HTTP {r['code']} - {r['taille']} octets")
+else:
+no(r["erreur"])
+
+
+def cmd_rotate():
+sect("TEST ROTATION IDENTITE")
+client = ClientAnon(use_tor=False)
+for i in range(8):
+r = client.get("http://httpbin.org/user-agent")
+if r["ok"]:
+try:
+body = r["data"].split(b"\r\n\r\n", 1)[1].decode()
+data = json.loads(body)
+ua = data.get("user-agent", "?")
+ok(f"[{i+1}] {ua[:70]}")
+except Exception:
+pass
+client.rotateur.rotate()
+print()
+info(f"Rotations : {client.rotateur.count}")
+
+
+def cmd_headers():
+sect("HEADERS GENERES")
+rot = Rotateur()
+for i in range(5):
+h = rot.headers()
+print(f"\n{C}[{i+1}] UA:{N} {h['User-Agent'][:70]}")
+for k, v in h.items():
+if k != "User-Agent":
+print(f" {k}: {v[:60]}")
+rot.rotate()
+
+
+def cmd_multi(urls):
+sect("TEST MULTI-URL VIA TOR")
+client = ClientAnon(use_tor=True)
+if not client.check_tor():
+no("Tor non disponible"); return
+
+def fetch(u):
+r = client.get(u)
+return u, r
+
+with ThreadPoolExecutor(max_workers=5) as ex:
+futures = [ex.submit(fetch, u) for u in urls]
+for f in as_completed(futures):
+u, r = f.result()
+if r["ok"]:
+ok(f"{u[:50].ljust(50)} HTTP {r['code']} ({r['taille']}o)")
+else:
+no(f"{u[:50].ljust(50)} {r['erreur'][:40]}")
+
+
+def cmd_dns_leak():
+sect("TEST FUITE DNS")
+info("Test via Tor vers un service de detection DNS...")
+client = ClientAnon(use_tor=True)
+if not client.check_tor():
+no("Tor non disponible"); return
+r = client.get("https://www.dnsleaktest.com/")
+if r["ok"]:
+ok(f"HTTP {r['code']} - page chargee")
+warn("Verifie manuellement sur https://dnsleaktest.com")
+else:
+no(r["erreur"])
+
+
+def cmd_ssl_test(host="github.com"):
+sect(f"TEST SSL VIA TOR : {host}")
+client = ClientAnon(use_tor=True)
+if not client.check_tor():
+no("Tor non disponible"); return
+r = client.get(f"https://{host}")
+if r["ok"]:
+ok(f"SSL OK - HTTP {r['code']} - {r['taille']} octets")
+else:
+no(r["erreur"])
+
+
+def cmd_benchmark():
+sect("BENCHMARK TOR")
+client = ClientAnon(use_tor=True)
+if not client.check_tor():
+no("Tor non disponible"); return
+
+cibles = [
+"http://check.torproject.org/api/ip",
+"http://example.com",
+"https://api.ipify.org?format=json",
+]
+for url in cibles:
+debut = time.time()
+r = client.get(url)
+duree = (time.time() - debut) * 1000
+if r["ok"]:
+ok(f"{url[:50].ljust(50)} {int(duree)}ms ({r['taille']}o)")
+else:
+no(f"{url[:50].ljust(50)} {r['erreur'][:40]}")
+print()
+info(f"Stats : {json.dumps(client.stats)}")
+
+
+def cmd_stats():
+sect("STATS")
+print(json.dumps({"socks_host": SOCKS_HOST, "socks_port": SOCKS_PORT,
+"user_agents": len(USER_AGENTS),
+"headers_obfuscation": len(OBFUSCATION_HEADERS)}, indent=2))
+
+
+def cmd_useragents():
+sect("USER-AGENTS DISPONIBLES")
+for i, ua in enumerate(USER_AGENTS, 1):
+print(f" [{i}] {ua[:80]}")
+
+
+def cmd_headers_obf():
+sect("HEADERS OBFUSCATION")
+print(json.dumps(OBFUSCATION_HEADERS, indent=2, ensure_ascii=False))
+
+
+COMMANDES = {
+"check": (cmd_check, "check - Verifie si Tor est actif"),
+"ip": (cmd_ip, "ip - IP publique via Tor"),
+"test": (cmd_test_direct, "test [url] - Test direct (sans Tor)"),
+"test-tor": (cmd_test_tor, "test-tor [url] - Test via Tor"),
+"rotate": (cmd_rotate, "rotate - Test rotation identite"),
+"headers": (cmd_headers, "headers - Affiche les headers generes"),
+"multi": (cmd_multi, "multi <url1> <url2> - Test multi-URL Tor"),
+"dns-leak": (cmd_dns_leak, "dns-leak - Test fuite DNS"),
+"ssl": (cmd_ssl_test, "ssl <host> - Test SSL via Tor"),
+"benchmark": (cmd_benchmark, "benchmark - Benchmark latence Tor"),
+"stats": (cmd_stats, "stats - Stats config"),
+"ua": (cmd_useragents, "ua - Liste user-agents"),
+"headers-obf": (cmd_headers_obf, "headers-obf - Headers obfuscation"),
+}
+
+
+def usage():
+print(f"""
+{C}NEXUS MODEL 06 - TOR / ANONYMISATION{N}
+Chemin: {BASE}/modele_06.py
+Port: AUCUN (CLI)
+
+Usage: python3 modele_06.py <commande> [args]
+
+Commandes:
+""")
+for nom, (_, desc) in COMMANDES.items():
+print(f" {nom.ljust(15)} {desc}")
+print(f"""
+Exemples:
+python3 modele_06.py check
+python3 modele_06.py ip
+python3 modele_06.py test-tor http://example.com
+python3 modele_06.py rotate
+python3 modele_06.py ssl github.com
+python3 modele_06.py benchmark
+""")
+
+
+def main():
+if len(sys.argv) < 2:
+usage(); return
+cmd = sys.argv[1]
+args = sys.argv[2:]
+if cmd not in COMMANDES:
+no(f"Commande inconnue: {cmd}")
+usage(); return
+fn, _ = COMMANDES[cmd]
+sect(f"{cmd} {' '.join(args)[:60]}")
+try:
+if cmd == "multi":
+fn(args) if args else fn([])
+elif cmd in ("test", "test-tor", "ssl"):
+fn(*args) if args else fn()
+else:
+fn()
+except Exception as e:
+no(f"Erreur: {e}")
+
+
+if __name__ == "__main__":
+main()
