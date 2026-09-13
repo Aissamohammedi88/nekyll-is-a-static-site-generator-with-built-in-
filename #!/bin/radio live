@@ -1,0 +1,327 @@
+#!/usr/bin/env python3# -*- coding: utf-8 -*-
+"""
+NEXUS MODEL 04 - RADIO / STREAMING
+Chemin: ~/Documents/nexus_autonome/modele_04.py
+Port: AUCUN (CLI uniquement)
+Analyse les flux radio, extrait les métadonnées, détecte les stations.
+"""
+
+import sys, os, ssl, re, json, time, socket, struct, urllib.request, urllib.error
+from pathlib import Path
+from datetime import datetime
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+BASE = Path.home() / "Documents" / "nexus_autonome"
+BASE.mkdir(parents=True, exist_ok=True)
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+HEADERS = {
+'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',
+'Accept': '*/*',
+'Icy-MetaData': '1',
+}
+
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'; B = '\033[94m'; C = '\033[96m'; N = '\033[0m'
+def ok(m): print(f"{V}[OK]{N} {m}")
+def no(m): print(f"{R}[KO]{N} {m}")
+def warn(m): print(f"{J}[!!]{N} {m}")
+def info(m): print(f"{B}[i]{N} {m}")
+def sect(m): print(f"\n{C}{'='*60}{N}\n{C} {m}{N}\n{C}{'='*60}{N}\n")
+
+
+# ===== BASE DE STATIONS =====
+STATIONS = {
+"nrj": {"nom": "NRJ", "url": "https://cdn.nrjaudio.fm/audio1/fr/30001/mp3_128.mp3", "pays": "FR", "genre": "Pop/Hits"},
+"skyrock": {"nom": "Skyrock", "url": "https://icecast.skyrock.net/s/natio_mp3_128k", "pays": "FR", "genre": "Rap/RnB"},
+"fun": {"nom": "Fun Radio", "url": "https://stream.funradio.fr/fun-1-44-128", "pays": "FR", "genre": "Dance/Electro"},
+"rfm": {"nom": "RFM", "url": "https://stream.rfm.fr/rfm-wr5.aac", "pays": "FR", "genre": "Pop/Rock"},
+"rtl": {"nom": "RTL", "url": "https://icecast.rtl.fr/rtl-1-44-128", "pays": "FR", "genre": "Généraliste"},
+"rmc": {"nom": "RMC", "url": "https://audio.bfmtv.com/rmcradio_128.mp3", "pays": "FR", "genre": "Info/Sport"},
+"europe1": {"nom": "Europe 1", "url": "https://europe1.lmn.fm/europe1.mp3", "pays": "FR", "genre": "Généraliste"},
+"fip": {"nom": "FIP", "url": "https://icecast.radiofrance.fr/fip-midfi.mp3", "pays": "FR", "genre": "Éclectique"},
+"inter": {"nom": "France Inter", "url": "https://icecast.radiofrance.fr/franceinter-midfi.mp3", "pays": "FR", "genre": "Généraliste"},
+"info": {"nom": "France Info", "url": "https://icecast.radiofrance.fr/franceinfo-midfi.mp3", "pays": "FR", "genre": "Info"},
+"culture": {"nom": "France Culture","url": "https://icecast.radiofrance.fr/franceculture-midfi.mp3", "pays": "FR", "genre": "Culture"},
+"musique": {"nom": "France Musique","url": "https://icecast.radiofrance.fr/francemusique-midfi.mp3", "pays": "FR", "genre": "Classique"},
+"nostalgie": {"nom": "Nostalgie", "url": "https://cdn.nrjaudio.fm/audio1/fr/30601/mp3_128.mp3", "pays": "FR", "genre": "Variété"},
+"cheriefm": {"nom": "Chérie FM", "url": "https://cdn.nrjaudio.fm/audio1/fr/30201/mp3_128.mp3", "pays": "FR", "genre": "Love Songs"},
+"rire": {"nom": "Rire & Chansons","url": "https://cdn.nrjaudio.fm/audio1/fr/30401/mp3_128.mp3", "pays": "FR", "genre": "Humour"},
+"classique": {"nom": "Radio Classique","url": "https://radioclassique.ice.infomaniak.ch/radioclassique-high.mp3", "pays": "FR", "genre": "Classique"},
+"bbc1": {"nom": "BBC Radio 1", "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_one", "pays": "UK", "genre": "Pop"},
+"bbc4": {"nom": "BBC Radio 4", "url": "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_fourfm", "pays": "UK", "genre": "Talk"},
+"npr": {"nom": "NPR", "url": "https://npr-ice.streamguys1.com/live.mp3", "pays": "US", "genre": "Info"},
+"kexp": {"nom": "KEXP", "url": "https://kexp-mp3-128.streamguys1.com/kexp128.mp3", "pays": "US", "genre": "Indé"},
+"soma": {"nom": "SomaFM", "url": "https://ice1.somafm.com/groovesalad-128-mp3", "pays": "US", "genre": "Électronique"},
+"radio_swiss": {"nom": "Radio Swiss Jazz","url": "https://stream.srg-ssr.ch/m/rsj/mp3_128", "pays": "CH", "genre": "Jazz"},
+"radio_swiss_classic": {"nom": "Radio Swiss Classic","url": "https://stream.srg-ssr.ch/m/rsc_de/mp3_128", "pays": "CH", "genre": "Classique"},
+"radio_swiss_pop": {"nom": "Radio Swiss Pop","url": "https://stream.srg-ssr.ch/m/rsp/mp3_128", "pays": "CH", "genre": "Pop"},
+}
+
+
+# ===== MÉTADONNÉES ICY =====
+def lire_icy(stream_url, timeout=10):
+"""Lit les métadonnées ICY d'un flux."""
+try:
+req = urllib.request.Request(stream_url, headers=HEADERS)
+resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+
+# Headers ICY
+icy_name = resp.headers.get("icy-name", "")
+icy_genre = resp.headers.get("icy-genre", "")
+icy_br = resp.headers.get("icy-br", "")
+icy_url = resp.headers.get("icy-url", "")
+icy_desc = resp.headers.get("icy-description", "")
+server = resp.headers.get("Server", "")
+content_type = resp.headers.get("Content-Type", "")
+metaint = resp.headers.get("icy-metaint")
+
+info_stream = {
+"name": icy_name,
+"genre": icy_genre,
+"bitrate": icy_br,
+"url_icy": icy_url,
+"description": icy_desc,
+"server": server,
+"content_type": content_type,
+"metaint": metaint,
+}
+
+# Métadonnées en cours
+titre = None
+if metaint:
+metaint = int(metaint)
+resp.read(metaint) # skip audio
+length_byte = resp.read(1)
+if length_byte:
+length = length_byte[0] * 16
+if length > 0:
+meta = resp.read(length).decode("utf-8", errors="ignore").rstrip("\x00").strip()
+if "StreamTitle=" in meta:
+start = meta.find("StreamTitle='") + len("StreamTitle='")
+end = meta.find("'", start)
+titre = meta[start:end]
+
+resp.close()
+return {"ok": True, "info": info_stream, "titre_en_cours": titre}
+except Exception as e:
+return {"ok": False, "erreur": str(e)[:120]}
+
+
+def parse_m3u(url, timeout=10):
+"""Parse un fichier M3U de playlist."""
+try:
+req = urllib.request.Request(url, headers=HEADERS)
+with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+contenu = r.read().decode("utf-8", errors="ignore")
+stations = []
+courant = {}
+for ligne in contenu.split("\n"):
+ligne = ligne.strip()
+if not ligne or ligne.startswith("#EXTM3U"):
+continue
+if ligne.startswith("#EXTINF:"):
+info = ligne[8:]
+m = re.match(r'(-?\d+),?(.*)', info)
+if m:
+courant["duree"] = m.group(1)
+courant["nom"] = m.group(2).strip()
+elif ligne.startswith("#"):
+continue
+else:
+courant["url"] = ligne
+if courant:
+stations.append(courant)
+courant = {}
+return {"ok": True, "stations": stations}
+except Exception as e:
+return {"ok": False, "erreur": str(e)[:120]}
+
+
+# ===== COMMANDES =====
+def cmd_list():
+print(f"\n{C}{len(STATIONS)} stations disponibles{N}\n")
+for key, s in sorted(STATIONS.items(), key=lambda x: x[1]["nom"]):
+print(f" {V}•{N} {key.ljust(20)} {s['nom'].ljust(25)} {s['pays']} {s['genre']}")
+
+def cmd_info(key):
+if key not in STATIONS:
+no(f"Station inconnue: {key}")
+info("Utilise 'list' pour voir les stations")
+return
+s = STATIONS[key]
+print(json.dumps(s, indent=2, ensure_ascii=False))
+
+def cmd_now(key):
+if key not in STATIONS:
+no(f"Station inconnue: {key}"); return
+s = STATIONS[key]
+info(f"Interrogation de {s['nom']}...")
+r = lire_icy(s["url"])
+if not r["ok"]:
+no(f"Erreur: {r['erreur']}")
+return
+print()
+info(f"Station : {r['info'].get('name') or s['nom']}")
+info(f"Genre : {r['info'].get('genre') or s['genre']}")
+info(f"Bitrate : {r['info'].get('bitrate') or '?'} kbps")
+info(f"Serveur : {r['info'].get('server') or '?'}")
+if r["titre_en_cours"]:
+ok(f"EN COURS : {r['titre_en_cours']}")
+else:
+warn("Titre en cours indisponible")
+
+def cmd_watch(key, interval=30):
+if key not in STATIONS:
+no(f"Station inconnue: {key}"); return
+s = STATIONS[key]
+info(f"Surveillance de {s['nom']} toutes les {interval}s (Ctrl+C pour arrêter)\n")
+dernier = ""
+try:
+while True:
+r = lire_icy(s["url"])
+if r["ok"] and r["titre_en_cours"]:
+t = r["titre_en_cours"]
+if t != dernier:
+print(f" {time.strftime('%H:%M:%S')} 🎵 {t}")
+dernier = t
+else:
+print(f" {time.strftime('%H:%M:%S')} (pas de changement)")
+else:
+warn(f"{time.strftime('%H:%M:%S')} erreur")
+time.sleep(interval)
+except KeyboardInterrupt:
+print("\n👋 Arrêté")
+
+def cmd_scan_stations():
+sect("SCAN DE TOUTES LES STATIONS")
+resultats = []
+def check(key):
+s = STATIONS[key]
+r = lire_icy(s["url"], timeout=6)
+return key, s["nom"], r
+with ThreadPoolExecutor(max_workers=10) as ex:
+futures = [ex.submit(check, k) for k in STATIONS]
+for f in as_completed(futures):
+key, nom, r = f.result()
+statut = "✅" if r["ok"] else "❌"
+titre = r.get("titre_en_cours", "") if r["ok"] else r.get("erreur", "")
+print(f" {statut} {key.ljust(20)} {nom.ljust(25)} {titre[:60]}")
+resultats.append({"key": key, "nom": nom, "ok": r["ok"], "titre": titre})
+print()
+ok(f"{sum(1 for x in resultats if x['ok'])}/{len(resultats)} stations actives")
+
+def cmd_search(mot):
+mot = mot.lower()
+trouves = [(k, s) for k, s in STATIONS.items() if mot in s["nom"].lower() or mot in s["genre"].lower() or mot in s["pays"].lower()]
+if not trouves:
+warn(f"Aucune station trouvée pour: {mot}"); return
+print(f"\n{C}{len(trouves)} stations trouvées pour '{mot}'{N}\n")
+for k, s in trouves:
+print(f" {V}•{N} {k.ljust(20)} {s['nom'].ljust(25)} {s['pays']} {s['genre']}")
+
+def cmd_genre(genre):
+genre = genre.lower()
+trouves = [(k, s) for k, s in STATIONS.items() if genre in s["genre"].lower()]
+if not trouves:
+warn(f"Aucune station pour le genre: {genre}"); return
+print(f"\n{C}Stations genre '{genre}'{N}\n")
+for k, s in trouves:
+print(f" {V}•{N} {k.ljust(20)} {s['nom'].ljust(25)}")
+
+def cmd_playlist(url):
+info(f"Parse playlist: {url}")
+r = parse_m3u(url)
+if not r["ok"]:
+no(f"Erreur: {r['erreur']}"); return
+ok(f"{len(r['stations'])} stations trouvées")
+for s in r["stations"][:30]:
+print(f" • {s.get('nom', '?')} → {s.get('url', '?')[:80]}")
+
+def cmd_metaint(url):
+info(f"Analyse ICY: {url}")
+r = lire_icy(url)
+if not r["ok"]:
+no(f"Erreur: {r['erreur']}"); return
+print(json.dumps(r, indent=2, ensure_ascii=False))
+
+def cmd_add(key, url, nom=None, genre=None):
+STATIONS[key] = {
+"nom": nom or key,
+"url": url,
+"pays": "?",
+"genre": genre or "?",
+}
+ok(f"Station ajoutée: {key}")
+
+def cmd_export():
+print(json.dumps(STATIONS, indent=2, ensure_ascii=False))
+
+def cmd_save():
+fichier = BASE / "stations.json"
+fichier.write_text(json.dumps(STATIONS, indent=2, ensure_ascii=False), encoding="utf-8")
+ok(f"Sauvegardé: {fichier}")
+
+
+COMMANDES = {
+"list": (cmd_list, "list - Liste les stations"),
+"info": (cmd_info, "info <key> - Détails d'une station"),
+"now": (cmd_now, "now <key> - Titre en cours"),
+"watch": (cmd_watch, "watch <key> [sec] - Surveille une station"),
+"scan": (cmd_scan_stations,"scan - Scanne toutes les stations"),
+"search": (cmd_search, "search <mot> - Recherche par nom/genre/pays"),
+"genre": (cmd_genre, "genre <genre> - Stations d'un genre"),
+"playlist": (cmd_playlist, "playlist <url.m3u> - Parse une playlist"),
+"metaint": (cmd_metaint, "metaint <url> - Analyse ICY brute"),
+"add": (cmd_add, "add <key> <url> [nom] [genre] - Ajoute station"),
+"export": (cmd_export, "export - Exporte en JSON"),
+"save": (cmd_save, "save - Sauvegarde dans stations.json"),
+}
+
+
+def usage():
+print(f"""
+{C}NEXUS MODEL 04 - RADIO / STREAMING{N}
+Chemin: {BASE}/modele_04.py
+Port: AUCUN (CLI)
+
+Usage: python3 modele_04.py <commande> [args]
+
+Commandes:
+""")
+for nom, (_, desc) in COMMANDES.items():
+print(f" {nom.ljust(12)} {desc}")
+print(f"""
+Exemples:
+python3 modele_04.py list
+python3 modele_04.py now nrj
+python3 modele_04.py now skyrock
+python3 modele_04.py watch fip
+python3 modele_04.py scan
+python3 modele_04.py search jazz
+python3 modele_04.py genre info
+python3 modele_04.py playlist https://exemple.com/radio.m3u
+""")
+
+
+def main():
+if len(sys.argv) < 2:
+usage(); return
+cmd = sys.argv[1]
+args = sys.argv[2:]
+if cmd not in COMMANDES:
+no(f"Commande inconnue: {cmd}")
+usage(); return
+fn, _ = COMMANDES[cmd]
+sect(f"{cmd} {' '.join(args)}")
+try:
+fn(*args)
+except Exception as e:
+no(f"Erreur: {e}")
+
+
+if __name__ == "__main__":
+main()
