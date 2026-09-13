@@ -37,3 +37,63 @@ jobs:
     - name: Test with pytest
       run: |
         pytest
+<div align="center">
+# 🧬 NEKYLL
+
+**Le générateur de sites statiques avec 10 outils intégrés.**
+
+[![NEKYLL CI](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions/workflows/nekyll-ci.yml/badge.svg)](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions)
+[![Docker](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions/workflows/nekyll-docker.yml/badge.svg)](https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-/actions)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+
+*Forgé par **CreWos Sybot** · Fondé par **Aïssa Mohammedi***
+
+</div>
+
+---
+
+## 🎯 C'est quoi NEKYLL ?
+
+**NEKYLL** est un générateur de sites statiques **open source**, écrit en **Python pur**, avec **10 outils intégrés** — tout ce dont un développeur a besoin pour créer, analyser, sécuriser et déployer des sites.
+
+**Pas de dépendance lourde. Pas de Node.js. Pas de build compliqué.**
+
+Juste **Python** et **10 outils** qui font le travail.
+
+---
+
+## 🔥 Les 10 outils intégrés
+
+| # | Module | Fonction |
+|---|--------|----------|
+| **1** | 🌐 **Network Scanner** | Port scan, DNS, ping, HTTP status, LAN |
+| **2** | 🔍 **Analysis HTML** | Fetch, extract, colors, fonts, framework |
+| **3** | 🏗️ **Forge Site** | Génère un site depuis une URL ou une config |
+| **4** | 📻 **Radio** | Streams, métadonnées, now playing |
+| **5** | 📧 **Email** | Mailto, composition, envoi |
+| **6** | 🕵️ **Tor / Anon** | SOCKS5, rotation, obfuscation |
+| **7** | ⚡ **Benchmark** | wrk-style, load test, latency |
+| **8** | 💾 **USB Transfer** | Détection clé, transfert, vérification hash |
+| **9** | 📚 **README / Docs** | Générateur de doc projet |
+| **10** | 🚀 **Launcher** | Ouvre tous les ports, interface unifiée |
+
+---
+
+## 🚀 Installation en 30 secondes
+
+```bash
+# 1. Clone
+git clone https://github.com/Aissamohammedi88/nekyll-is-a-static-site-generator-with-built-in-.git
+cd nekyll-is-a-static-site-generator-with-built-in-
+
+# 2. Crée un venv
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Installe
+pip install -r requirements.txt
+
+# 4. Lance
+python3 app.py
