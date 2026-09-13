@@ -1,0 +1,47 @@
+#!/bin/bash
+# 🧬 NEXUS BRIDGE — CreWos Sybot
+# Génère une config Tor avec bridges privés obfs4
+
+BRIDGES=(
+    "obfs4 1.2.3.4:443 FINGERPRINT cert=XXX iat-mode=0"
+    "obfs4 5.6.7.8:8080 FINGERPRINT cert=YYY iat-mode=0"
+    "obfs4 9.10.11.12:9001 FINGERPRINT cert=ZZZ iat-mode=0"
+    "meek_lite 0.0.0.0:80 url=https://meek.azureedge.net/ front=ajax.aspnetcdn.com"
+    "snowflake 192.0.2.3:80 FINGERPRINT"
+)
+
+echo "🧬 NEXUS BRIDGE — Configuration Tor"
+echo ""
+echo "Bridges disponibles :"
+for i in "${!BRIDGES[@]}"; do
+    echo "  [$((i+1))] ${BRIDGES[$i]}"
+done
+echo ""
+
+cat > ~/.torrc << 'EOF'
+# NEXUS ORB — Tor config personnalisée
+SocksPort 9050
+ControlPort 9051
+
+# Bridges privés (à remplacer par les tiens)
+UseBridges 1
+ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy
+ClientTransportPlugin meek_lite exec /usr/bin/obfs4proxy
+ClientTransportPlugin snowflake exec /usr/bin/snowflake-client
+
+# Rotations plus agressives
+CircuitBuildTimeout 30
+LearnCircuitBuildTimeout 1
+MaxCircuitDirtiness 60
+NewCircuitPeriod 15
+
+# Multi-hop
+CircuitStreamTimeout 30
+
+# Confidentialité
+SafeLogging 1
+Log notice file ~/nexus_orb.log
+EOF
+
+echo "✅ ~/.torrc créé"
+echo "Lance : tor -f ~/.torrc"
