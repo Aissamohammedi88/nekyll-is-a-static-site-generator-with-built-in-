@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+NEXUS MODEL 07 - GOBLINK PROTOCOL
+Chemin: ~/Documents/nexus_autonome/modele_07.py
+Port: AUCUN (CLI uniquement)
+Deep linking, fetch intelligent, analyse de liens, extraction de graphes,
+traçage de chaînes de redirection, cartographie réseau de contenu.
+"""
+
+import sys, os, ssl, re, json, time, socket, hashlib, urllib.request, urllib.error
+from pathlib import Path
+from datetime import datetime
+from urllib.parse import urlparse, urljoin, parse_qs, unquote
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+BASE = Path.home() / "Documents" / "nexus_autonome"
+GRAPHS = BASE / "graphs"
+GRAPHS.mkdir(parents=True, exist_ok=True)
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+HEADERS = {
+'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',
+'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
+}
+
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'; B = '\033[94m'; C = '\033[96m'; M = '\033[95m'; N = '\033[0m'
+def ok(m): print(f"{V}[OK]{N} {m}")
+def no(m): print(f"{R}[KO]{N} {m}")
+def warn(m): print(f"{J}[!!]{N} {m}")
+def info(m): print(f"{B}[i]{N} {m}")
+def sect(m): print(f"\n{C}{'='*64}{N}\n{C} {m}{N}\n{C}{'='*64}{N}\n")
+
+
+# ===== FETCH INTELLIGENT =====
+def fetch(url, timeout=15, follow=True):
+"""Fetch avec suivi de redirections, capture de la chaîne complète."""
+chaine = []
+courant = url
+for _ in range(10 if follow else 1):
+try:
+req = urllib.request.Request(courant, headers=HEADERS)
+with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+html = r.read().decode('utf-8', errors='ignore')
+final = r.geturl()
+code = r.status
+chaine.append({"url": courant, "code": code, "final": final})
+if final == courant:
+return html, final, chaine
+courant = final
+except urllib.error.HTTPError as e:
+chaine.append({"url": courant, "code": e.code, "erreur": "http"})
+return None, courant, chaine
+except Exception as e:
+chaine.append({"url": courant, "code": 0, "erreur": str(e)[:60]})
+return None, courant, chaine
+return None, courant, chaine
+
+
+# ===== EXTRACTION DE LIENS =====
+def extraire_liens(html, base_url):
+liens = []
+for m in re.findall(r'<a[^>]+href=["\']([^"\']+)', html, re.I):
+if m.startswith('#') or m.startswith('javascript:') or m.startswith('mailto:'):
+continue
+liens.append(urljoin(base_url, m))
+return list(dict.fromkeys(liens)) # dédup
+
+
+def extraire_ressources(html, base_url):
+ressources = {"css": [], "js": [], "img": [], "fonts": [], "video": []}
+for m in re.findall(r'<link[^>]+href=["\']([^"\']+\.css[^"\']*)', html, re.I):
+ressources["css"].append(urljoin(base_url, m))
+for m in re.findall(r'<script[^>]+src=["\']([^"\']+)', html, re.I):
+ressources["js"].append(urljoin(base_url, m))
+for m in re.findall(r'<img[^>]+src=["\']([^"\']+)', html, re.I):
+ressources["img"].append(urljoin(base_url, m))
+for m in re.findall(r'url\(["\']?([^"\')]+\.(woff2?|ttf|otf))', html, re.I):
+ressources["fonts"].append(urljoin(base_url, m[0]))
+for m in re.findall(r'<video[^>]+src=["\']([^"\']+)', html, re.I):
+ressources["video"].append(urljoin(base_url, m))
+for k in ressources:
+ressources[k] = list(dict.fromkeys(ressources[k]))
+return ressources
+
+
+# ===== CRAWLER DE PROFONDEUR =====
+def crawler(url_depart, profondeur=2, max_pages=50):
+"""Crawler BFS jusqu'à N profondeur, construire le graphe."""
+visites = set()
+graphe = defaultdict(set)
+file = deque([(url_depart, 0)])
+pages = {}
+
+while file and len(visites) < max_pages:
+url, niveau = file.popleft()
+if url in visites or niveau > profondeur:
+continue
+visites.add(url)
+
+html, final, chaine = fetch(url, timeout=8)
+if not html:
+continue
+
+titre = ""
+m = re.search(r'<title[^>]*>(.*?)</title>', html, re.I | re.S)
+if m: titre = m.group(1).strip()[:100]
+
+pages[url] = {
+"titre": titre,
+"niveau": niveau,
+"taille": len(html),
+"redirections": chaine,
+}
+
+liens = extraire_liens(html, final)
+for lien in liens:
+graphe[url].add(lien)
+if lien not in visites and niveau + 1 <= profondeur:
+file.append((lien, niveau + 1))
+
+return {
+"url_depart": url_depart,
+"profondeur_max": profondeur,
+"pages_visitees": len(visites),
+"graphe": {k: list(v) for k, v in graphe.items()},
+"pages": pages,
+}
+
+
+# ===== SUIVI DE REDIRECTIONS =====
+def suivre_redirections(url):
+"""Trace TOUTE la chaîne de redirections."""
+chaine = []
+courant = url
+for i in range(15):
+try:
+req = urllib.request.Request(courant, headers=HEADERS)
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+chaine.append({
+"etape": i + 1,
+"url": courant,
+"code": r.status,
+"final": r.geturl(),
+})
+if r.geturl() == courant:
+break
+courant = r.geturl()
+except urllib.error.HTTPError as e:
+chaine.append({"etape": i + 1, "url": courant, "code": e.code})
+break
+except Exception as e:
+chaine.append({"etape": i + 1, "url": courant, "erreur": str(e)[:60]})
+break
+return chaine
+
+
+# ===== EXTRACTION DE PARAMÈTRES =====
+def extraire_parametres(url):
+p = urlparse(url)
+params = parse_qs(p.query)
+return {
+"url": url,
+"scheme": p.scheme,
+"host": p.hostname,
+"port": p.port,
+"path": p.path,
+"params": {k: v for k, v in params.items()},
+"fragment": p.fragment,
+}
+
+
+# ===== EXTRACTION D'URLS DANS UN TEXTE =====
+def extraire_urls_texte(texte):
+pattern = r'https?://[^\s<>"\'\)\]]+'
+return list(dict.fromkeys(re.findall(pattern, texte)))
+
+
+# ===== CARTE DE DOMAINES =====
+def carte_domaines(urls):
+domaines = defaultdict(int)
+sous_domaines = defaultdict(set)
+for u in urls:
+try:
+p = urlparse(u)
+if p.hostname:
+domaines[p.hostname] += 1
+parts = p.hostname.split('.')
+if len(parts) > 2:
+sous_domaines['.'.join(parts[-2:])].add(p.hostname)
+except Exception:
+pass
+return {
+"domaines": dict(sorted(domaines.items(), key=lambda x: -x[1])[:50]),
+"sous_domaines": {k: list(v) for k, v in sous_domaines.items()},
+}
+
+
+# ===== FETCH PARALLÈLE =====
+def fetch_parallele(urls, max_workers=20):
+"""Fetch plusieurs URLs en parallèle."""
+resultats = {}
+def fetch_one(u):
+html, final, chaine = fetch(u, timeout=8)
+return u, {"ok": html is not None, "taille": len(html) if html else 0,
+"final": final, "chaine": chaine}
+with ThreadPoolExecutor(max_workers=max_workers) as ex:
+futures = [ex.submit(fetch_one, u) for u in urls]
+for f in as_completed(futures):
+u, r = f.result()
+resultats[u] = r
+return resultats
+
+
+# ===== COMMANDES =====
+def cmd_fetch(url):
+sect(f"FETCH: {url}")
+html, final, chaine = fetch(url)
+if html is None:
+no(f"Erreur: {chaine[-1].get('erreur', '?')}")
+return
+ok(f"URL finale: {final}")
+ok(f"Taille: {len(html):,} caractères")
+info(f"Chaîne de redirections ({len(chaine)} étapes):")
+for e in chaine:
+print(f" {e.get('code', '?')} {e['url'][:80]}")
+
+def cmd_redirect(url):
+sect(f"REDIRECTIONS: {url}")
+chaine = suivre_redirections(url)
+for e in chaine:
+code = e.get('code', '?')
+print(f" [{code}] {e['url'][:90]}")
+
+def cmd_liens(url):
+sect(f"LIENS: {url}")
+html, final, _ = fetch(url)
+if not html:
+no("Erreur fetch"); return
+liens = extraire_liens(html, final)
+ok(f"{len(liens)} liens trouvés")
+for l in liens[:100]:
+print(f" {l}")
+
+def cmd_ressources(url):
+sect(f"RESSOURCES: {url}")
+html, final, _ = fetch(url)
+if not html:
+no("Erreur fetch"); return
+r = extraire_ressources(html, final)
+for cat, liste in r.items():
+if liste:
+info(f"{cat.upper()} ({len(liste)}):")
+for x in liste[:20]:
+print(f" {x}")
+
+def cmd_params(url):
+sect(f"PARAMÈTRES: {url}")
+p = extraire_parametres(url)
+print(json.dumps(p, indent=2, ensure_ascii=False))
+
+def cmd_crawl(url, profondeur=2, max_pages=50):
+sect(f"CRAWL: {url} (profondeur {profondeur})")
+r = crawler(url, profondeur, max_pages)
+ok(f"Pages visitées: {r['pages_visitees']}")
+info(f"Graphe: {len(r['graphe'])} pages connectées")
+for url_p, data in list(r["pages"].items())[:20]:
+print(f"\n {url_p[:80]}")
+print(f" → {data['titre'][:60]} ({data['taille']}o)")
+
+def cmd_domaines(urls_fichier):
+if not Path(urls_fichier).exists():
+no(f"Fichier introuvable: {urls_fichier}"); return
+urls = [l.strip() for l in Path(urls_fichier).read_text().splitlines() if l.strip()]
+carte = carte_domaines(urls)
+sect("CARTE DE DOMAINES")
+for d, n in carte["domaines"].items():
+print(f" {str(n).ljust(5)} {d}")
+
+def cmd_parallele(urls_fichier):
+if not Path(urls_fichier).exists():
+no(f"Fichier introuvable: {urls_fichier}"); return
+urls = [l.strip() for l in Path(urls_fichier).read_text().splitlines() if l.strip()]
+sect(f"FETCH PARALLÈLE: {len(urls)} URLs")
+r = fetch_parallele(urls)
+ok_count = sum(1 for x in r.values() if x["ok"])
+ok(f"{ok_count}/{len(urls)} OK")
+for u, data in r.items():
+statut = "OK" if data["ok"] else "KO"
+print(f" [{statut}] {u[:60]} ({data['taille']}o)")
+
+def cmd_texte(fichier):
+if not Path(fichier).exists():
+no(f"Fichier introuvable: {fichier}"); return
+texte = Path(fichier).read_text(errors="ignore")
+urls = extraire_urls_texte(texte)
+ok(f"{len(urls)} URLs trouvées")
+for u in urls[:100]:
+print(f" {u}")
+
+def cmd_export(url, profondeur=2):
+r = crawler(url, profondeur)
+ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+nom = re.sub(r'[^a-zA-Z0-9]', '_', urlparse(url).netloc)[:40]
+f = GRAPHS / f"graph_{nom}_{ts}.json"
+f.write_text(json.dumps(r, indent=2, ensure_ascii=False), encoding="utf-8")
+ok(f"Exporté: {f}")
+
+
+COMMANDES = {
+"fetch": (cmd_fetch, "fetch <url> - Fetch simple"),
+"redirect": (cmd_redirect, "redirect <url> - Trace redirections"),
+"liens": (cmd_liens, "liens <url> - Extrait les liens"),
+"ressources":(cmd_ressources,"ressources <url> - CSS/JS/img/fonts"),
+"params": (cmd_params, "params <url> - Paramètres URL"),
+"crawl": (cmd_crawl, "crawl <url> [prof] [max] - Crawler BFS"),
+"domaines": (cmd_domaines, "domaines <fichier> - Carte de domaines"),
+"parallele": (cmd_parallele, "parallele <fichier> - Fetch parallèle"),
+"texte": (cmd_texte, "texte <fichier> - URLs dans un texte"),
+"export": (cmd_export, "export <url> [prof] - Export graphe JSON"),
+}
+
+
+def usage():
+print(f"""
+{C}NEXUS MODEL 07 - GOBLINK PROTOCOL{N}
+Chemin: {BASE}/modele_07.py
+Port: AUCUN (CLI)
+
+Usage: python3 modele_07.py <commande> [args]
+
+Commandes:
+""")
+for nom, (_, desc) in COMMANDES.items():
+print(f" {nom.ljust(12)} {desc}")
+print(f"""
+Exemples:
+python3 modele_07.py fetch https://example.com
+python3 modele_07.py redirect https://bit.ly/xxx
+python3 modele_07.py liens https://github.com
+python3 modele_07.py crawl https://example.com 2 30
+python3 modele_07.py parallele urls.txt
+python3 modele_07.py export https://example.com 3
+""")
+
+
+def main():
+if len(sys.argv) < 2:
+usage(); return
+cmd = sys.argv[1]
+args = sys.argv[2:]
+if cmd not in COMMANDES:
+no(f"Commande inconnue: {cmd}")
+usage(); return
+fn, _ = COMMANDES[cmd]
+sect(f"{cmd} {' '.join(args)[:70]}")
+try:
+if cmd == "crawl":
+url = args[0]
+prof = int(args[1]) if len(args) > 1 else 2
+max_p = int(args[2]) if len(args) > 2 else 50
+fn(url, prof, max_p)
+elif cmd == "export":
+url = args[0]
+prof = int(args[1]) if len(args) > 1 else 2
+fn(url, prof)
+else:
+fn(*args) if args else fn()
+except Exception as e:
+no(f"Erreur: {e}")
+
+
+if __name__ == "__main__":
+main()
