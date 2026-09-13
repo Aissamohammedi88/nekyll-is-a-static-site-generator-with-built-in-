@@ -1,0 +1,332 @@
+#!/usr/bin/env python3# -*- coding: utf-8 -*-
+"""
+NEXUS MODEL 09 - STATIC FORGE (mieux que Jekyll)
+Chemin: ~/Documents/nexus_autonome/modele_09.py
+Port: AUCUN (CLI uniquement)
+
+Générateur web statique Python pur.
+Optimisé vitesse + multimodal + langages historiques.
+
+Usage:
+python3 modele_09.py new <site> - Crée un site
+python3 modele_09.py build <site> - Génère HTML/CSS/JS
+python3 modele_09.py preview <site> - Build + serveur local
+python3 modele_09.py compete - Score vs Google
+python3 modele_09.py langs - Liste les 20 langages
+"""
+
+import sys, os, re, json, time, html, hashlib, secrets, threading
+import urllib.request, urllib.error, ssl
+import http.server, socketserver
+from pathlib import Path
+from datetime import datetime
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Any, Optional, Tuple
+
+# ================================================================
+# CONFIG
+# ================================================================
+BASE = Path.home() / "Documents" / "nexus_autonome"
+BASE.mkdir(parents=True, exist_ok=True)
+SITES_DIR = BASE / "sites"
+SITES_DIR.mkdir(exist_ok=True)
+EXPORT_DIR = Path.home() / "Documents"
+EXPORT_DIR.mkdir(exist_ok=True)
+
+PORT_DEFAULT = 9009 # Port dédié (ouverture étape 10)
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'; B = '\033[94m'; C = '\033[96m'; M = '\033[95m'; N = '\033[0m'
+def ok(m): print(f"{V}[OK]{N} {m}")
+def no(m): print(f"{R}[KO]{N} {m}")
+def warn(m): print(f"{J}[!!]{N} {m}")
+def info(m): print(f"{B}[i]{N} {m}")
+def sect(m): print(f"\n{C}{'='*64}{N}\n{C} {m}{N}\n{C}{'='*64}{N}\n")
+
+
+# ================================================================
+# 20 LANGAGES (avec historique + année)
+# ================================================================
+LANGAGES = {
+"objc": {"nom": "Objective-C", "icone": "🍎", "couleur": "#438EFF", "annee": 1984, "ext": "m", "paradigme": "orienté objet"},
+"perl": {"nom": "Perl", "icone": "🐪", "couleur": "#39457E", "annee": 1987, "ext": "pl", "paradigme": "multi-paradigme"},
+"simula": {"nom": "Simula", "icone": "🏗️", "couleur": "#5B6770", "annee": 1962, "ext": "sim", "paradigme": "orienté objet"},
+"python": {"nom": "Python", "icone": "🐍", "couleur": "#3776AB", "annee": 1991, "ext": "py", "paradigme": "multi-paradigme"},
+"java": {"nom": "Java", "icone": "☕", "couleur": "#007396", "annee": 1995, "ext": "java","paradigme": "orienté objet"},
+"js": {"nom": "JavaScript", "icone": "⚡", "couleur": "#F7DF1E", "annee": 1995, "ext": "js", "paradigme": "multi-paradigme"},
+"ts": {"nom": "TypeScript", "icone": "🔷", "couleur": "#3178C6", "annee": 2012, "ext": "ts", "paradigme": "orienté objet"},
+"go": {"nom": "Go", "icone": "🐹", "couleur": "#00ADD8", "annee": 2009, "ext": "go", "paradigme": "concurrent"},
+"rust": {"nom": "Rust", "icone": "🦀", "couleur": "#DEA584", "annee": 2010, "ext": "rs", "paradigme": "système"},
+"ruby": {"nom": "Ruby", "icone": "💎", "couleur": "#CC342D", "annee": 1995, "ext": "rb", "paradigme": "orienté objet"},
+"php": {"nom": "PHP", "icone": "🐘", "couleur": "#777BB4", "annee": 1995, "ext": "php", "paradigme": "procédural"},
+"c": {"nom": "C", "icone": "🔧", "couleur": "#A8B9CC", "annee": 1972, "ext": "c", "paradigme": "procédural"},
+"cpp": {"nom": "C++", "icone": "➕", "couleur": "#00599C", "annee": 1985, "ext": "cpp", "paradigme": "multi-paradigme"},
+"csharp": {"nom": "C#", "icone": "🎯", "couleur": "#239120", "annee": 2000, "ext": "cs", "paradigme": "orienté objet"},
+"kotlin": {"nom": "Kotlin", "icone": "🎨", "couleur": "#7F52FF", "annee": 2011, "ext": "kt", "paradigme": "multi-paradigme"},
+"swift": {"nom": "Swift", "icone": "🦅", "couleur": "#FA7343", "annee": 2014, "ext": "swift","paradigme": "multi-paradigme"},
+"scala": {"nom": "Scala", "icone": "🔺", "couleur": "#DC322F", "annee": 2004, "ext": "scala","paradigme": "fonctionnel"},
+"haskell": {"nom": "Haskell", "icone": "λ", "couleur": "#5D4F85", "annee": 1990, "ext": "hs", "paradigme": "fonctionnel"},
+"lua": {"nom": "Lua", "icone": "🌙", "couleur": "#000080", "annee": 1993, "ext": "lua", "paradigme": "multi-paradigme"},
+"jibril": {"nom": "Jibril", "icone": "🧬", "couleur": "#FF6EC7", "annee": 2026, "ext": "jbr", "paradigme": "résonance cognitive"},
+}
+
+
+# ================================================================
+# EXEMPLES DE CODE POUR CHAQUE LANGAGE
+# ================================================================
+EXEMPLES = {
+"objc": '''#import <Foundation/Foundation.h>
+
+int main() {
+@autoreleasepool {
+NSString *nom = @"NEXUS";
+NSArray *modules = @[@"forge", @"api"];
+NSLog(@"%@ : %lu modules", nom, [modules count]);
+}
+return 0;
+}''',
+"perl": '''#!/usr/bin/perl
+use strict;
+use warnings;
+
+my $nom = "NEXUS";
+my @modules = ("forge", "api");
+printf "%s : %d modules\\n", $nom, scalar @modules;''',
+"simula": '''class Nexus;
+begin
+text nom;
+integer modules;
+nom :- "NEXUS";
+modules := 2;
+outtext(nom); outimage;
+end;''',
+"python": '''class Nexus:
+def __init__(self, nom):
+self.nom = nom
+self.modules = []
+
+def ajouter(self, m):
+self.modules.append(m)
+return self
+
+app = Nexus("NEXUS").ajouter("forge").ajouter("api")
+print(f"{app.nom} : {len(app.modules)} modules")''',
+"java": '''public class Nexus {
+public static void main(String[] args) {
+String nom = "NEXUS";
+int modules = 2;
+System.out.printf("%s : %d modules%n", nom, modules);
+}
+}''',
+"js": '''const nexus = {
+nom: "NEXUS",
+modules: ["forge", "api"],
+forger() { return `${this.nom} : ${this.modules.length} modules`; }
+};
+console.log(nexus.forger());''',
+"ts": '''interface Module { nom: string; version: string; }
+
+class Nexus {
+private modules: Module[] = [];
+constructor(private nom: string) {}
+ajouter(m: Module): this { this.modules.push(m); return this; }
+forger(): string { return `${this.nom} : ${this.modules.length}`; }
+}
+
+console.log(new Nexus("NEXUS").ajouter({nom: "forge", version: "1.0"}).forger());''',
+"go": '''package main
+import "fmt"
+
+func main() {
+nom := "NEXUS"
+modules := 2
+fmt.Printf("%s : %d modules\\n", nom, modules)
+}''',
+"rust": '''fn main() {
+let nom = "NEXUS";
+let modules = 2;
+println!("{} : {} modules", nom, modules);
+}''',
+"ruby": '''nom = "NEXUS"
+modules = ["forge", "api"]
+puts "#{nom} : #{modules.size} modules"''',
+"php": '''<?php
+$nom = "NEXUS";
+$modules = ["forge", "api"];
+printf("%s : %d modules\\n", $nom, count($modules));''',
+"c": '''#include <stdio.h>
+
+int main() {
+char nom[] = "NEXUS";
+int modules = 2;
+printf("%s : %d modules\\n", nom, modules);
+return 0;
+}''',
+"cpp": '''#include <iostream>
+#include <string>
+
+int main() {
+std::string nom = "NEXUS";
+int modules = 2;
+std::cout << nom << " : " << modules << " modules" << std::endl;
+return 0;
+}''',
+"csharp": '''using System;
+
+class Program {
+static void Main() {
+string nom = "NEXUS";
+int modules = 2;
+Console.WriteLine($"{nom} : {modules} modules");
+}
+}''',
+"kotlin": '''fun main() {
+val nom = "NEXUS"
+val modules = 2
+println("$nom : $modules modules")
+}''',
+"swift": '''let nom = "NEXUS"
+let modules = 2
+print("\\(nom) : \\(modules) modules")''',
+"scala": '''object Main extends App {
+val nom = "NEXUS"
+val modules = 2
+println(s"$nom : $modules modules")
+}''',
+"haskell": '''main :: IO ()
+main = putStrLn "NEXUS : 2 modules"''',
+"lua": '''local nom = "NEXUS"
+local modules = 2
+print(nom .. " : " .. modules .. " modules")''',
+"jibril": '''forge Nexus {
+resonance: "x627 ms",
+hook(entree) { memoire.ajouter(entree); retourner forger(entree) }
+}
+app = Nexus()
+app.hook("NEXUS")''',
+}
+
+
+# ================================================================
+# PARSEUR MARKDOWN (maison, 200 lignes)
+# ================================================================
+class MarkdownParser:
+def __init__(self):
+self.code_blocks = []
+
+def parse(self, text: str) -> str:
+# Protège les blocs de code
+text = re.sub(r"```(\w*)\n(.*?)```", self._sauver_code, text, flags=re.DOTALL)
+
+# Titres
+for i in range(6, 0, -1):
+text = re.sub(rf"^{'#' * i} (.+)$", rf"<h{i}>\1</h{i}>", text, flags=re.MULTILINE)
+
+# Gras / italique
+text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", text)
+
+# Code inline
+text = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", text)
+
+# Liens / images
+text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r'<img src="\2" alt="\1">', text)
+text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+
+# Listes
+text = self._listes(text)
+
+# Paragraphes
+text = self._paragraphes(text)
+
+# Restaure les blocs de code
+for i, html_code in enumerate(self.code_blocks):
+text = text.replace(f"__CODEBLOCK_{i}__", html_code)
+
+return text
+
+def _sauver_code(self, m):
+lang = m.group(1) or "text"
+code = m.group(2).rstrip()
+idx = len(self.code_blocks)
+self.code_blocks.append(self._highlight(code, lang))
+return f"__CODEBLOCK_{idx}__"
+
+def _highlight(self, code: str, lang: str) -> str:
+esc = html.escape(code)
+if lang not in LANGAGES:
+return f'<pre class="code"><code>{esc}</code></pre>'
+return f'<pre class="code" data-lang="{lang}"><code>{esc}</code></pre>'
+
+def _listes(self, text: str) -> str:
+lignes = text.split("\n")
+out, in_ul, in_ol = [], False, False
+for l in lignes:
+if re.match(r"^[-*] ", l):
+if not in_ul:
+if in_ol: out.append("</ol>"); in_ol = False
+out.append("<ul>"); in_ul = True
+out.append(f"<li>{l[2:]}</li>")
+elif re.match(r"^\d+\. ", l):
+if not in_ol:
+if in_ul: out.append("</ul>"); in_ul = False
+out.append("<ol>"); in_ol = True
+out.append(f"<li>{re.sub(r'^\d+\. ', '', l)}</li>")
+else:
+if in_ul: out.append("</ul>"); in_ul = False
+if in_ol: out.append("</ol>"); in_ol = False
+out.append(l)
+if in_ul: out.append("</ul>")
+if in_ol: out.append("</ol>")
+return "\n".join(out)
+
+def _paragraphes(self, text: str) -> str:
+paras = []
+for bloc in text.split("\n\n"):
+bloc = bloc.strip()
+if not bloc: continue
+if bloc.startswith("<") and not bloc.startswith("<a "):
+paras.append(bloc)
+else:
+paras.append(f"<p>{bloc}</p>")
+return "\n".join(paras)
+
+
+# ================================================================
+# GÉNÉRATEUR
+# ================================================================
+class StaticForge:
+def __init__(self, nom_site: str):
+self.nom = nom_site
+self.dir = SITES_DIR / re.sub(r"[^a-zA-Z0-9_-]", "_", nom_site)[:50]
+self.dir.mkdir(parents=True, exist_ok=True)
+self.src = self.dir / "src"
+self.out = self.dir / "public"
+self.src.mkdir(exist_ok=True)
+self.out.mkdir(exist_ok=True)
+self.md = MarkdownParser()
+
+def creer_structure(self):
+"""Crée la structure de base."""
+(self.src / "index.md").write_text(f"""# {self.nom}
+
+Généré par NEXUS Static Forge — mieux que Jekyll.
+
+## Fonctionnalités
+
+- 20 langages dont Objective-C (1984), Perl (1987), Simula (1962)
+- Coloration syntaxique maison
+- Vitesse parallèle
+- Multimodal (texte + code)
+
+## Exemple Python
+
+```python
+class Nexus:
+def __init__(self, nom):
+self.nom = nom
+return self
