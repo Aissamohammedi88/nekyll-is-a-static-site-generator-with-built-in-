@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+NEXUS MODEL 01 - SCANNER RESEAU
+Chemin: ~/Documents/nexus_autonome/modele_01.py
+Port: AUCUN (CLI uniquement)
+Lance: python3 modele_01.py <commande> [args]
+"""
+
+import sys, os, ssl, re, json, time, socket, threading, urllib.request, urllib.error
+from pathlib import Path
+from datetime import datetime
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+BASE = Path.home() / "Documents" / "nexus_autonome"
+BASE.mkdir(parents=True, exist_ok=True)
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+HEADERS = {
+'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',
+'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+}
+
+V = '\033[92m'; J = '\033[93m'; R = '\033[91]'; B = '\033[94m'; C = '\033[96m'; N = '\033[0m'
+def ok(m): print(f"{V}[OK]{N} {m}")
+def no(m): print(f"{R}[KO]{N} {m}")
+def warn(m): print(f"{J}[!!]{N} {m}")
+def info(m): print(f"{B}[i]{N} {m}")
+def sect(m): print(f"\n{C}{'='*60}{N}\n{C} {m}{N}\n{C}{'='*60}{N}\n")
+
+
+# ===== SCANNER RESEAU =====
+def ip_locale():
+try:
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect(("8.8.8.8", 80))
+ip = s.getsockname()[0]
+s.close()
+return ip
+except Exception as e:
+return f"erreur: {e}"
+
+def ip_publique():
+try:
+req = urllib.request.Request("https://api.ipify.org?format=json", headers=HEADERS)
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+data = json.loads(r.read())
+return data.get("ip", "?")
+except Exception as e:
+return f"erreur: {e}"
+
+def ping_tcp(host, port=80, timeout=3):
+debut = time.time()
+try:
+s = socket.create_connection((host, int(port)), timeout=timeout)
+s.close()
+return round((time.time() - debut) * 1000, 2)
+except Exception:
+return None
+
+def port_scan(host, ports=None):
+if ports is None:
+ports = [21,22,23,25,53,80,110,143,443,445,993,995,3306,3389,5432,
+5900,6379,8080,8443,9000,9001,9002,9003,9004,9005,9006,
+9007,9008,9009,9010,9011]
+ouverts = []
+def check(p):
+try:
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.6)
+r = s.connect_ex((host, p))
+s.close()
+return p if r == 0 else None
+except Exception:
+return None
+with ThreadPoolExecutor(max_workers=50) as ex:
+futures = [ex.submit(check, p) for p in ports]
+for f in as_completed(futures):
+r = f.result()
+if r: ouverts.append(r)
+return sorted(ouverts)
+
+def dns_lookup(host):
+try:
+infos = socket.gethostbyname_ex(host)
+return {"host": host, "nom": infos[0], "aliases": infos[1], "ips": infos[2]}
+except Exception as e:
+return {"host": host, "erreur": str(e)}
+
+def dns_reverse(ip):
+try:
+h = socket.gethostbyaddr(ip)
+return {"ip": ip, "hostname": h[0], "aliases": h[1]}
+except Exception as e:
+return {"ip": ip, "erreur": str(e)}
+
+def http_status(url):
+try:
+req = urllib.request.Request(url, headers=HEADERS, method="HEAD")
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+return {"url": url, "code": r.status,
+"serveur": r.headers.get("Server", "?"),
+"type": r.headers.get("Content-Type", "?")}
+except urllib.error.HTTPError as e:
+return {"url": url, "code": e.code}
+except Exception as e:
+return {"url": url, "erreur": str(e)[:80]}
+
+def latency(host, port=443, n=5):
+temps = []
+for _ in range(n):
+d = ping_tcp(host, port, 3)
+if d is not None:
+temps.append(d)
+if not temps:
+return {"host": host, "erreur": "aucun test reussi"}
+return {"host": host, "port": port, "min": min(temps),
+"max": max(temps), "moy": round(sum(temps)/len(temps), 2)}
+
+def scan_lan(subnet=None):
+if not subnet:
+ip = ip_locale()
+if "erreur" in str(ip):
+return {"erreur": "impossible de detecter le subnet"}
+parts = ip.split(".")
+subnet = f"{parts[0]}.{parts[1]}.{parts[2]}"
+actifs = []
+def ping_ip(i):
+ip = f"{subnet}.{i}"
+for port in [80, 443, 22, 445, 8080]:
+try:
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.3)
+r = s.connect_ex((ip, port))
+s.close()
+if r == 0:
+return ip
+except Exception:
+pass
+return None
+with ThreadPoolExecutor(max_workers=100) as ex:
+futures = [ex.submit(ping_ip, i) for i in range(1, 255)]
+for f in as_completed(futures):
+r = f.result()
+if r: actifs.append(r)
+return {"subnet": f"{subnet}.0/24", "appareils": sorted(set(actifs))}
+
+def whois_basic(domaine):
+try:
+url = f"https://rdap.org/domain/{domaine}"
+req = urllib.request.Request(url, headers=HEADERS)
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+data = json.loads(r.read())
+dates = {}
+for e in data.get("events", []):
+dates[e.get("eventAction", "?")] = e.get("eventDate", "?")
+return {"domaine": domaine, "dates": dates}
+except Exception as e:
+return {"domaine": domaine, "erreur": str(e)[:80]}
+
+def security_headers(url):
+try:
+req = urllib.request.Request(url, headers=HEADERS, method="HEAD")
+with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+headers = dict(r.headers)
+securite = ["Strict-Transport-Security", "Content-Security-Policy",
+"X-Frame-Options", "X-Content-Type-Options",
+"Referrer-Policy", "Permissions-Policy"]
+return {h: headers.get(h, "ABSENT") for h in securite}
+except Exception as e:
+return {"erreur": str(e)[:80]}
+
+def ssl_info(host, port=443):
+try:
+s = socket.create_connection((host, port), timeout=5)
+c = ssl.create_default_context()
+c.check_hostname = False
+c.verify_mode = ssl.CERT_NONE
+ss = c.wrap_socket(s, server_hostname=host)
+cert = ss.getpeercert()
+ss.close()
+return {
+"host": host,
+"sujet": dict(x[0] for x in cert.get("subject", [])),
+"emetteur": dict(x[0] for x in cert.get("issuer", [])),
+"valide_du": cert.get("notBefore", "?"),
+"valide_au": cert.get("notAfter", "?"),
+}
+except Exception as e:
+return {"host": host, "erreur": str(e)[:80]}
+
+def banner(host, port):
+try:
+s = socket.create_connection((host, int(port)), timeout=5)
+s.settimeout(3)
+try:
+s.send(b"\r\n")
+data = s.recv(1024)
+s.close()
+return {"host": host, "port": port,
+"banniere": data.decode("utf-8", errors="ignore")[:200]}
+except Exception:
+s.close()
+return {"host": host, "port": port, "banniere": ""}
+except Exception as e:
+return {"host": host, "port": port, "erreur": str(e)[:80]}
+
+def traceroute(host, max_hops=10):
+try:
+ip = socket.gethostbyname(host)
+except Exception as e:
+return {"erreur": str(e)}
+hops = []
+for ttl in range(1, max_hops + 1):
+try:
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+s.setsockopt(socket.SOL_IP, socket.IP_TTL, ttl)
+s.settimeout(1)
+s.sendto(b"", (ip, 33434))
+try:
+_, addr = s.recvfrom(512)
+hops.append({"ttl": ttl, "ip": addr[0]})
+except socket.timeout:
+hops.append({"ttl": ttl, "ip": "*"})
+s.close()
+except Exception:
+break
+return {"host": host, "ip": ip, "hops": hops}
+
+
+# ===== CLI =====
+COMMANDES = {
+"ip-locale": (ip_locale, "Affiche l'IP locale"),
+"ip-publique": (ip_publique, "Affiche l'IP publique"),
+"ping": (ping_tcp, "ping <host> [port]"),
+"port-scan": (port_scan, "port-scan <host> [ports]"),
+"dns": (dns_lookup, "dns <host>"),
+"dns-reverse": (dns_reverse, "dns-reverse <ip>"),
+"http": (http_status, "http <url>"),
+"latence": (latency, "latence <host> [port] [n]"),
+"lan": (scan_lan, "lan [subnet]"),
+"whois": (whois_basic, "whois <domaine>"),
+"secu": (security_headers, "secu <url>"),
+"ssl": (ssl_info, "ssl <host> [port]"),
+"banner": (banner, "banner <host> <port>"),
+"traceroute": (traceroute, "traceroute <host> [max_hops]"),
+}
+
+def usage():
+print(f"""
+{C}NEXUS MODEL 01 - SCANNER RESEAU{N}
+Chemin: {BASE}/modele_01.py
+Port: AUCUN (CLI)
+
+Usage: python3 modele_01.py <commande> [args]
+
+Commandes:
+""")
+for nom, (_, desc) in COMMANDES.items():
+print(f" {nom.ljust(15)} {desc}")
+print(f"""
+Exemples:
+python3 modele_01.py ip-locale
+python3 modele_01.py ip-publique
+python3 modele_01.py ping 8.8.8.8
+python3 modele_01.py port-scan 192.168.1.42
+python3 modele_01.py dns github.com
+python3 modele_01.py http https://example.com
+python3 modele_01.py lan
+python3 modele_01.py ssl github.com
+""")
+
+def main():
+if len(sys.argv) < 2:
+usage(); return
+cmd = sys.argv[1]
+args = sys.argv[2:]
+if cmd not in COMMANDES:
+no(f"Commande inconnue: {cmd}")
+usage(); return
+fn, _ = COMMANDES[cmd]
+sect(f"{cmd} {' '.join(args)}")
+try:
+if cmd == "ping":
+host = args[0] if args else "8.8.8.8"
+port = int(args[1]) if len(args) > 1 else 80
+r = fn(host, port)
+if r is not None:
+ok(f"{host}:{port} -> {r} ms")
+else:
+no(f"{host}:{port} injoignable")
+elif cmd == "port-scan":
+if not args:
+no("Usage: port-scan <host>"); return
+host = args[0]
+ports = [int(p) for p in args[1:]] if len(args) > 1 else None
+r = fn(host, ports)
+info(f"Cible: {host}")
+info(f"Ouverts: {r}")
+elif cmd == "latence":
+host = args[0] if args else "1.1.1.1"
+port = int(args[1]) if len(args) > 1 else 443
+n = int(args[2]) if len(args) > 2 else 5
+r = fn(host, port, n)
+print(json.dumps(r, indent=2, ensure_ascii=False))
+elif cmd == "banner":
+if len(args) < 2:
+no("Usage: banner <host> <port>"); return
+r = fn(args[0], int(args[1]))
+print(json.dumps(r, indent=2, ensure_ascii=False))
+elif cmd == "ssl":
+host = args[0] if args else "github.com"
+port = int(args[1]) if len(args) > 1 else 443
+r = fn(host, port)
+print(json.dumps(r, indent=2, ensure_ascii=False))
+elif cmd == "traceroute":
+host = args[0] if args else "8.8.8.8"
+max_h = int(args[1]) if len(args) > 1 else 10
+r = fn(host, max_h)
+print(json.dumps(r, indent=2, ensure_ascii=False))
+else:
+r = fn(*args) if args else fn()
+if isinstance(r, (dict, list)):
+print(json.dumps(r, indent=2, ensure_ascii=False))
+else:
+ok(str(r))
+except IndexError:
+no(f"Arguments manquants pour {cmd}")
+except Exception as e:
+no(f"Erreur: {e}")
+
+if __name__ == "__main__":
+main()
